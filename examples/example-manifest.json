@@ -1,0 +1,24 @@
+{
+  "id": "e4233b08adfe418f80a0128669a45c85",
+  "file": "files/e4233b08adfe418f80a0128669a45c85.pdf",
+  "at": "2026-10-27T19:46:43+00:00",
+  "issue": false,
+  "page_count": 5,
+  "manifest": [
+    {
+      "document_id": "a1b708f685534674b02574f604e40501",
+      "title": "Level 02 framing",
+      "revision_id": "e1e78f0d6af44c8fa5dde37566c2342d",
+      "revision_label": "P02",
+      "sha256": "25ee494065de19bf822df054c84b0a5ff38087059e55429da197d052bc746572",
+      "pages": 1,
+      "start_page": 4
+    }
+  ],
+  "warnings": [],
+  "approvals": {
+    "generated_by": "Demo Engineer",
+    "checked_by": "Not reviewed",
+    "approved_by": "Not approved"
+  }
+}
