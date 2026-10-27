@@ -76,22 +76,22 @@ def compile_report(p, workspace, options, warnings):
     issue = bool(options.get('issue', False))
     status = 'ISSUED' if issue else 'DRAFT - FOR REVIEW'
     entries, parts, manifest = [], [], []
-    for section in p['sections']:
-        docs = [(p['documents'][did], p['documents'][did]['revisions'][-1]) for did in section['document_ids']]
-        docs = [(d, r) for d, r in docs if r['is_pdf']]
-        if not docs:
-            continue
-        entries.append({'title': section['name'], 'kind': 'section', 'offset': len(parts)})
-        def divider(c, section=section):
-            logo(c, 56, 638)
-            line(c, p['number'], 56, 595, size=11)
-            line(c, section['name'], 56, 530, 'Helvetica-Bold', 30)
-            line(c, p['name'], 56, 492, size=15)
-            line(c, status, 56, 450, size=10, color=TEAL)
-        parts.extend(page_pdf(divider).pages)
-        for d, r in docs:
+
+    filter_types = options.get('filter_types')  # None = all types, or list of type strings
+
+    def section_ok(s):
+        return filter_types is None or s.get('type', 'other') in filter_types
+
+    # Build subsection lookup: parent_id → [child sections]
+    children = {}
+    for s in p['sections']:
+        if s.get('parent_id'):
+            children.setdefault(s['parent_id'], []).append(s)
+
+    def add_docs(doc_list, depth):
+        for d, r in doc_list:
             offset = len(parts)
-            entries.append({'title': f'{d["title"]} [{r["label"]}]', 'kind': 'document', 'offset': offset})
+            entries.append({'title': f'{d["title"]} [{r["label"]}]', 'kind': 'document', 'offset': offset, 'depth': depth})
             content = workspace.file_path(r['file']).read_bytes()
             if hashlib.sha256(content).hexdigest() != r['sha256']:
                 raise ValueError(f'Stored source checksum changed: {d["title"]}. Restore the original or upload a new revision.')
@@ -99,16 +99,60 @@ def compile_report(p, workspace, options, warnings):
             parts.extend(reader.pages)
             manifest.append(dict(document_id=d['id'], title=d['title'], revision_id=r['id'],
                                  revision_label=r['label'], sha256=r['sha256'], offset=offset, pages=len(reader.pages)))
+
+    def make_divider(sec_name, parent_name=None):
+        def divider(c):
+            logo(c, 56, 638)
+            line(c, p['number'], 56, 595, size=11)
+            if parent_name:
+                line(c, parent_name, 56, 565, 'Helvetica-Bold', 14, color=TEAL)
+                line(c, sec_name, 56, 522, 'Helvetica-Bold', 26)
+                line(c, p['name'], 56, 484, size=15)
+            else:
+                line(c, sec_name, 56, 530, 'Helvetica-Bold', 30)
+                line(c, p['name'], 56, 492, size=15)
+            line(c, status, 56, 450, size=10, color=TEAL)
+        return divider
+
+    for section in p['sections']:
+        if section.get('parent_id'):
+            continue  # handled under their parent
+        if not section_ok(section):
+            continue
+
+        direct_docs = [(p['documents'][did], p['documents'][did]['revisions'][-1])
+                       for did in section['document_ids']]
+        direct_docs = [(d, r) for d, r in direct_docs if r['is_pdf']]
+
+        sub_groups = [(sub, [(p['documents'][did], p['documents'][did]['revisions'][-1])
+                              for did in sub['document_ids']])
+                      for sub in children.get(section['id'], []) if section_ok(sub)]
+        sub_groups = [(sub, [(d, r) for d, r in docs if r['is_pdf']]) for sub, docs in sub_groups]
+        sub_groups = [(sub, docs) for sub, docs in sub_groups if docs]
+
+        if not direct_docs and not sub_groups:
+            continue
+
+        entries.append({'title': section['name'], 'kind': 'section', 'offset': len(parts)})
+        parts.extend(page_pdf(make_divider(section['name'])).pages)
+        add_docs(direct_docs, depth=1)
+
+        for sub, sub_docs in sub_groups:
+            entries.append({'title': sub['name'], 'kind': 'subsection', 'offset': len(parts)})
+            parts.extend(page_pdf(make_divider(sub['name'], parent_name=section['name'])).pages)
+            add_docs(sub_docs, depth=2)
+
     if not manifest:
         raise ValueError('Add at least one PDF before compiling a report.')
     register = register_pdf(p, warnings)
     if register:
-        entries.append(dict(title='Assumptions and code register', kind='section', offset=len(parts)))
+        entries.append(dict(title='Assumptions and code register', kind='section', offset=len(parts), depth=1))
         parts.extend(register.pages)
     toc_count = max(1, math.ceil(len(entries) / 22))
     front_count = 1 + toc_count
     total = front_count + len(parts)
     writer = PdfWriter()
+
     def cover(c):
         c.setFillColor(NAVY)
         c.rect(0, 680, 612, 112, fill=1, stroke=0)
@@ -127,6 +171,7 @@ def compile_report(p, workspace, options, warnings):
             c.setStrokeColor(colors.HexColor('#cbd5db'))
             c.line(56, y - 32, 556, y - 32)
         line(c, 'Names are recorded workflow fields; no digital signature or professional seal is applied.', 56, 80, size=8)
+
     writer.add_page(page_pdf(cover).pages[0])
     for index in range(toc_count):
         def toc(c, index=index):
@@ -134,8 +179,13 @@ def compile_report(p, workspace, options, warnings):
             line(c, p['name'], 56, 688, size=11, color=TEAL)
             for j, entry in enumerate(entries[index * 22:(index + 1) * 22]):
                 y = 641 - j * 24
-                x = 56 if entry['kind'] == 'section' else 72
-                line(c, entry['title'], x, y, 'Helvetica-Bold' if entry['kind'] == 'section' else 'Helvetica', 10, width=420)
+                if entry['kind'] == 'section':
+                    x, font = 56, 'Helvetica-Bold'
+                elif entry['kind'] == 'subsection':
+                    x, font = 68, 'Helvetica-Bold'
+                else:
+                    x, font = (84 if entry.get('depth', 1) > 1 else 72), 'Helvetica'
+                line(c, entry['title'], x, y, font, 10, width=476 - x)
                 line(c, str(front_count + entry['offset'] + 1), 526, y, size=10, width=40)
         writer.add_page(page_pdf(toc).pages[0])
     for page in parts:
@@ -158,7 +208,8 @@ def compile_report(p, workspace, options, warnings):
         page.mediabox.upper_right = (w, h + 26)
         page.cropbox.lower_left = (0, 0)
         page.cropbox.upper_right = (w, h + 26)
-    parent = None
+    parent_bookmark = None
+    sub_bookmark = None
     writer.add_outline_item('Cover', 0)
     writer.add_outline_item('Contents', 1)
     for i, entry in enumerate(entries):
@@ -167,9 +218,13 @@ def compile_report(p, workspace, options, warnings):
         # PDF explicit destinations require a page reference, not a numeric index.
         # pypdf 6.10's Link helper leaves an integer in this field.
         annotation['/Dest'][0] = writer.pages[target].indirect_reference
-        bookmark = writer.add_outline_item(entry['title'], target, parent=parent if entry['kind'] == 'document' else None)
         if entry['kind'] == 'section':
-            parent = bookmark
+            parent_bookmark = writer.add_outline_item(entry['title'], target, parent=None)
+            sub_bookmark = None
+        elif entry['kind'] == 'subsection':
+            sub_bookmark = writer.add_outline_item(entry['title'], target, parent=parent_bookmark)
+        else:
+            writer.add_outline_item(entry['title'], target, parent=sub_bookmark or parent_bookmark)
     for i, page in enumerate(writer.pages):
         stream = io.BytesIO()
         w, h = float(page.mediabox.width), float(page.mediabox.height)

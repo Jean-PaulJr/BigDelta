@@ -70,8 +70,16 @@ class Workspace:
         p = dict(id=uid(), name=required(data, 'name', 160), number=str(data.get('number', ''))[:80],
                  client=str(data.get('client', ''))[:160], phase='Planning', progress=0,
                  documents={}, changes=[], records=[], packages=[], events=[], sections=[])
-        for name in ['Design basis', 'Gravity systems', 'Lateral systems', 'Foundations', 'Drawings', 'Specifications']:
-            p['sections'].append(dict(id=uid(), name=name, document_ids=[]))
+        calc_id = uid()
+        p['sections'] = [
+            dict(id=uid(), name='Drawings', type='drawing', document_ids=[]),
+            dict(id=uid(), name='Specifications', type='specification', document_ids=[]),
+            dict(id=uid(), name='RFI / Comments', type='rfi', document_ids=[]),
+            dict(id=calc_id, name='Calculations', type='calculation', document_ids=[]),
+            dict(id=uid(), name='Gravity Systems', type='calculation', parent_id=calc_id, document_ids=[]),
+            dict(id=uid(), name='Lateral Systems', type='calculation', parent_id=calc_id, document_ids=[]),
+            dict(id=uid(), name='Foundations', type='calculation', parent_id=calc_id, document_ids=[]),
+        ]
         return self.save(p, 'Project created')
 
     def update_project(self, pid, data):
@@ -86,15 +94,55 @@ class Workspace:
 
     def template(self, pid, data):
         p = self.project(pid)
-        names = [str(x).strip() for x in data.get('names', [])]
-        if not names or len(names) > 100 or any(not n or len(n) > 120 for n in names) or len(set(names)) != len(names):
-            raise ValueError('Enter 1-100 unique section names, up to 120 characters each.')
+        _VALID_TYPES = ['drawing', 'specification', 'rfi', 'calculation', 'other']
+        if 'sections' in data:
+            raw = data['sections']
+            if not isinstance(raw, list) or not raw or len(raw) > 100:
+                raise ValueError('Enter 1–100 sections.')
+            processed = []
+            for s in raw:
+                name = str(s.get('name', '')).strip()
+                if not name or len(name) > 120:
+                    raise ValueError('Section names must be 1–120 characters.')
+                stype = str(s.get('type', 'other'))
+                pname = str(s['parent_name'])[:120] if s.get('parent_name') else None
+                processed.append({'name': name, 'type': stype if stype in _VALID_TYPES else 'other', 'parent_name': pname})
+            names = [s['name'] for s in processed]
+            if len(set(names)) != len(names):
+                raise ValueError('Section names must be unique.')
+        else:
+            names = [str(x).strip() for x in data.get('names', [])]
+            if not names or len(names) > 100 or any(not n or len(n) > 120 for n in names) or len(set(names)) != len(names):
+                raise ValueError('Enter 1–100 unique section names, up to 120 characters each.')
+            processed = [{'name': n, 'type': 'other', 'parent_name': None} for n in names]
         for s in p['sections']:
             if s['name'] not in names and s['document_ids']:
                 raise ValueError(f'Move documents out of "{s["name"]}" before removing the section.')
         existing = {s['name']: s for s in p['sections']}
-        p['sections'] = [existing.get(n, dict(id=uid(), name=n, document_ids=[])) for n in names]
+        new_sections = []
+        for v in processed:
+            ex = existing.get(v['name'])
+            new = dict(ex, type=v['type']) if ex else dict(id=uid(), name=v['name'], type=v['type'], document_ids=[])
+            new_sections.append(new)
+        id_by_name = {s['name']: s['id'] for s in new_sections}
+        for new, v in zip(new_sections, processed):
+            pn = v.get('parent_name')
+            if pn and pn in id_by_name and id_by_name[pn] != new['id']:
+                new['parent_id'] = id_by_name[pn]
+            else:
+                new.pop('parent_id', None)
+        p['sections'] = new_sections
         return self.save(p, 'Report template updated')
+
+    def update_document(self, pid, data):
+        p = self.project(pid)
+        did = data.get('document_id')
+        if did not in p['documents']:
+            raise ValueError('Document not found in this project.')
+        d = p['documents'][did]
+        title = required(data, 'title', 180)
+        d['title'] = title
+        return self.save(p, f'Document title updated: {title}')
 
     def upload(self, pid, data):
         p = self.project(pid)

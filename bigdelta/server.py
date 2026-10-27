@@ -106,6 +106,7 @@ def handler_for(workspace):
                                upload=workspace.upload, arrange=workspace.arrange, record=workspace.add_record,
                                change=workspace.add_change, resolve=workspace.resolve,
                                compile=workspace.compile, compare=workspace.compare,
+                               edit_document=workspace.update_document,
                                review_start=workspace.review_start, review_update=workspace.review_update,
                                review_export=workspace.review_export)
                 action = actions.get(parts[3])

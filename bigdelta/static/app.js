@@ -2,6 +2,7 @@
 let state = {projects: [], checks: {}, token: ''};
 let currentId = localStorage.getItem('bigdelta-project');
 let tab = 'Package builder';
+let packageFilter = 'all';
 let dialogAction = null;
 let comparison = null;
 let reviewSession = null;
@@ -67,15 +68,31 @@ function render() {
   $('tabs').innerHTML = ['Package builder','Design changes','Drawing compare','Calculation review','Project journal','Overview'].map(t=>`<button data-action="tab" data-id="${t}" class="${tab===t?'active':''}">${t}</button>`).join('');
   ({'Package builder':renderPackage,'Design changes':renderChanges,'Drawing compare':renderCompare,'Calculation review':renderReview,'Project journal':renderJournal,'Overview':renderOverview}[tab])();
 }
+function renderDocRows(section, p, isSub) {
+  if (!section.document_ids.length) return `<div class="empty">No documents yet.${isSub ? '' : ' Empty sections are omitted from the compiled package.'}</div>`;
+  return section.document_ids.map(did => {
+    const d = p.documents[did], r = latest(d);
+    return `<div class="document${isSub?' sub-doc':''}"><div class="file-icon">${r.is_pdf?'PDF':'FILE'}</div><div class="document-title"><strong>${esc(d.title)}</strong><small>${esc(r.filename)} · ${r.is_pdf?`${r.pages} pages`:'Attachment only'} · ${esc(r.author)}</small></div>${pill(r.label)}<div class="actions">${button('up','↑',did,`aria-label="Move up"`)}${button('down','↓',did,`aria-label="Move down"`)}${button('move','Move',did)}${button('edit-doc','Edit',did)}${button('revision','＋ Revision',did)}${button('history','History',did)}</div></div>`;
+  }).join('');
+}
 function renderPackage() {
   const p = project();
+  const childrenOf = {};
+  for (const s of p.sections) { if (s.parent_id) (childrenOf[s.parent_id] = childrenOf[s.parent_id]||[]).push(s); }
+  const TYPE_LABEL = {drawing:'Drawing',specification:'Specification',rfi:'RFI',calculation:'Calculation'};
+  const sectionOk = s => packageFilter==='all' || (s.type||'other')===packageFilter;
+  const filterBar = `<div class="filter-bar">${[['all','All'],['drawing','Drawings'],['specification','Specifications'],['rfi','RFI / Comments'],['calculation','Calculations']].map(([v,t])=>`<button type="button" class="filter-chip${packageFilter===v?' active':''}" data-action="pkg-filter" data-id="${v}">${t}</button>`).join('')}</div>`;
+  let sectionNum = 0;
+  const sectionsHtml = p.sections.filter(s => !s.parent_id && sectionOk(s)).map(s => {
+    sectionNum++;
+    const kids = (childrenOf[s.id]||[]).filter(sectionOk);
+    const totalDocs = s.document_ids.length + kids.reduce((n,c)=>n+c.document_ids.length,0);
+    const badge = s.type && TYPE_LABEL[s.type] ? `<span class="type-badge ${s.type}">${TYPE_LABEL[s.type]}</span>` : '';
+    return `<div class="card"><div class="card-head"><h3><span class="section-num">${String(sectionNum).padStart(2,'0')}</span>${esc(s.name)}${badge}</h3><small>${totalDocs} document${totalDocs===1?'':'s'}</small></div>${renderDocRows(s,p,false)}${kids.map(child=>`<div class="subsection-group"><div class="subsection-head"><span>${esc(child.name)}</span><small>${child.document_ids.length} document${child.document_ids.length===1?'':'s'}</small></div>${renderDocRows(child,p,true)}</div>`).join('')}</div>`;
+  }).join('') || '<div class="card empty">No sections match the current filter.</div>';
   $('content').innerHTML = `<div class="toolbar"><div><h2>Report package</h2><p>Your template. Your order. Always the latest uploaded revision.</p></div><div class="actions">${button('template','Edit template')}${button('upload','＋ Add documents')}</div></div>
   ${(state.checks[p.id]||[]).length ? `<div class="notice"><b>Review required before issue.</b> ${(state.checks[p.id]||[]).length} coordination items are open. Draft compilation remains available.</div>` : ''}
-  ${p.sections.map((s,i)=>`<div class="card"><div class="card-head"><h3><span class="section-num">${String(i+1).padStart(2,'0')}</span>${esc(s.name)}</h3><small>${s.document_ids.length} documents</small></div>
-  ${s.document_ids.length ? s.document_ids.map((did,j)=>{
-    const d=p.documents[did], r=latest(d);
-    return `<div class="document"><div class="file-icon">${r.is_pdf?'PDF':'FILE'}</div><div class="document-title"><strong>${esc(d.title)}</strong><small>${esc(r.filename)} · ${r.is_pdf?`${r.pages} pages`:'Attachment only'} · ${esc(r.author)}</small></div>${pill(r.label)}<div class="actions">${button('up','↑',did,`aria-label="Move ${esc(d.title)} up"`)}${button('down','↓',did,`aria-label="Move ${esc(d.title)} down"`)}${button('move','Move',did)}${button('revision','＋ Revision',did)}${button('history','History',did)}</div></div>`;
-  }).join('') : '<div class="empty">No documents yet. Empty sections are omitted from the compiled package.</div>'}</div>`).join('')}
+  ${filterBar}${sectionsHtml}
   <div class="toolbar"><div><h2>Compiled packages</h2><p>Each compilation preserves its revision manifest and original output.</p></div>${button('compile','Compile package ↗')}</div>
   <div class="card">${p.packages.length ? `<div class="table-wrap"><table><thead><tr><th>Compiled</th><th>Status</th><th>Pages</th><th>Package</th><th>Traceability</th></tr></thead><tbody>${[...p.packages].reverse().map(x=>`<tr><td>${date(x.at)}</td><td>${pill(x.issue?'Issued':'Draft',x.issue?'':'warn')}</td><td>${x.page_count}</td><td>${link(x.id,'Download PDF ↗')}</td><td><a href="/manifest/${x.id}" target="_blank" rel="noopener">Revision manifest ↗</a></td></tr>`).join('')}</tbody></table></div>` : '<div class="empty">Compile your first report to create a permanent package snapshot.</div>'}</div>`;
 }
@@ -91,7 +108,7 @@ function uploadDialog(did) {
   const selected = new Set((prev?.references || []).map(r=>`${r.document_id}:${r.revision_id}`));
   modal(d?'Upload a new revision':'Add project documents',
     `<div class="notice">${d?`Adding a revision to <b>${esc(d.title)}</b>. Previous files remain available.`:'Select multiple files to add them in filename order. PDFs are compiled; other files are retained as attachments.'}</div>`+
-    (d?'':field('Document title (optional for multiple files)','title')+select('Report section','section_id',p.sections.map(s=>[s.id,s.name])))+
+    (d?'':field('Document title (optional for multiple files)','title')+select('Report section','section_id',p.sections.map(s=>[s.id,(s.parent_id?'  ':'') + s.name])))+
     field(d?'Replacement file':'Files','files','','file',`required ${d?'':'multiple'}`)+
     field('Revision label','label','','text','required maxlength="50" placeholder="e.g. P01, V3, IFC"')+
     field('Uploaded by','author',localStorage.getItem('bigdelta-author')||'','text','required maxlength="120"')+
@@ -116,23 +133,51 @@ function uploadDialog(did) {
     },d?'Add revision':'Upload documents');
 }
 function templateDialog() {
-  const p=project();
-  modal('Customize report template',`<p>One section per line. Reorder lines to reorder the report. Move documents before removing their section.</p>`+
-    textarea('Section names','names',p.sections.map(s=>s.name).join('\n'),'required')+
-    `<div class="actions">${button('export-template','Export template JSON')}<label>Import template JSON<input id="import-template" type="file" accept=".json,application/json"></label></div>`,
-    data=>mutate('template',{names:data.names.split('\n').map(s=>s.trim()).filter(Boolean)},'Template updated.'));
-  $('import-template').addEventListener('change',async e=> {
-    try { const data=JSON.parse(await e.target.files[0].text()); if(!Array.isArray(data.sections)||data.sections.some(x=>typeof x!=='string')) throw new Error('Expected a sections array of names.');$('f-names').value=data.sections.join('\n'); }
-    catch(e){$('dialog-error').textContent=e.message;}
-  });
+  const p = project();
+  const sById = Object.fromEntries(p.sections.map(s=>[s.id,s]));
+  window._tSec = p.sections.map(s => ({
+    name: s.name, type: s.type||'other',
+    parent_name: s.parent_id && sById[s.parent_id] ? sById[s.parent_id].name : null
+  }));
+  const TYPE_OPTS = [['drawing','Drawing'],['specification','Specification'],['rfi','RFI / Comment'],['calculation','Calculation'],['other','Other']];
+  function renderTpl() {
+    const el = $('tpl-list'); if (!el) return;
+    const top = window._tSec.filter(s=>!s.parent_name);
+    el.innerHTML = window._tSec.map((s,i) => {
+      const pOpts = top.filter(t=>t!==s).map(t=>`<option value="${esc(t.name)}" ${s.parent_name===t.name?'selected':''}>${esc(t.name)}</option>`).join('');
+      return `<div class="section-row"><input class="sn-i" type="text" value="${esc(s.name)}" maxlength="120" placeholder="Section name"><select class="st-s">${TYPE_OPTS.map(([v,t])=>`<option value="${v}" ${s.type===v?'selected':''}>${t}</option>`).join('')}</select><select class="sp-s"><option value="">Top level</option>${pOpts}</select><span class="row-btns"><button type="button" data-action="tpl-up" data-idx="${i}" ${i===0?'disabled':''}>↑</button><button type="button" data-action="tpl-dn" data-idx="${i}" ${i===window._tSec.length-1?'disabled':''}>↓</button><button type="button" data-action="tpl-rm" data-idx="${i}">✕</button></span></div>`;
+    }).join('');
+  }
+  window._tplRender = renderTpl;
+  window._tplSync = () => {
+    const el = $('tpl-list'); if (!el) return;
+    el.querySelectorAll('.section-row').forEach((row,i) => {
+      if (i < window._tSec.length) { window._tSec[i].name=row.querySelector('.sn-i').value.trim(); window._tSec[i].type=row.querySelector('.st-s').value; window._tSec[i].parent_name=row.querySelector('.sp-s').value||null; }
+    });
+  };
+  modal('Customize report template',
+    `<p>Add, reorder, and tag sections. Set a parent to create nested subsections under Calculations.</p><div id="tpl-list" class="tpl-list"></div><button type="button" data-action="tpl-add" style="margin-top:10px">＋ Add section</button>`,
+    async () => { window._tplSync(); await mutate('template',{sections:window._tSec.map(s=>({...s}))},'Template updated.'); },
+    'Save template');
+  renderTpl();
 }
 function compileDialog() {
   const checks=state.checks[currentId]||[];
-  modal('Compile report package',`<div class="notice ${checks.length?'':'good'}">${checks.length?`<b>${checks.length} coordination items remain.</b><br>${checks.map(esc).join('<br>')}`:'No tracked coordination conflicts. Confirm the engineering review before issuing.'}</div><p class="help">Includes cover, linked contents, section dividers, bookmarks, continuous package page numbers, and the assumptions / code register. Documents whose current revision is a PDF are included.</p>`+
+  modal('Compile report package',`<div class="notice ${checks.length?'':'good'}">${checks.length?`<b>${checks.length} coordination items remain.</b><br>${checks.map(esc).join('<br>')}`:'No tracked coordination conflicts. Confirm the engineering review before issuing.'}</div><p class="help">Includes cover, linked contents, section dividers, bookmarks, continuous page numbers, and the assumptions / code register.</p>`+
     field('Generated by','generated_by',localStorage.getItem('bigdelta-author')||'','text','maxlength="160"')+
     field('Checked by','checked_by','','text','maxlength="160"')+field('Approved by','approved_by','','text','maxlength="160"')+
-    `<label><input type="checkbox" name="issue" ${checks.length?'disabled':''}> Issue this package (otherwise create a draft)</label><p class="help">Names are workflow records. This does not apply a digital signature or professional seal.</p>`,
-    async data=>{const result=await mutate('compile',{...data,issue:data.issue==='on'},'Package compiled. Download it from Compiled packages.');tab='Package builder';render();},'Compile PDF');
+    `<label>Include section types</label><div class="check-list">${[['drawing','Drawings'],['specification','Specifications'],['rfi','RFI / Comments'],['calculation','Calculations'],['other','Other']].map(([v,t])=>`<label><input type="checkbox" name="filter_type" value="${v}" checked> ${t}</label>`).join('')}</div>
+    <label><input type="checkbox" name="issue" ${checks.length?'disabled':''}> Issue this package (otherwise create a draft)</label><p class="help">Names are workflow records. This does not apply a digital signature or professional seal.</p>`,
+    async (data,form)=>{
+      const sel=[...form.querySelectorAll('[name=filter_type]:checked')].map(x=>x.value);
+      await mutate('compile',{...data,issue:data.issue==='on',filter_types:sel.length<5?sel:null},'Package compiled. Download it from Compiled packages.');
+      tab='Package builder';render();
+    },'Compile PDF');
+}
+function editDocumentDialog(did) {
+  const d = project().documents[did];
+  modal('Edit document', field('Document title','title',d.title,'text','required maxlength="180"'),
+    data => mutate('edit_document',{...data,document_id:did},'Document updated.'));
 }
 function renderChanges() {
   const p=project(),checks=state.checks[p.id]||[];
@@ -188,12 +233,25 @@ function exportJSON(name,data) {
 async function action(name,id,element) {
   const p=project();
   switch(name) {
-    case 'project':currentId=id;comparison=null;reviewSession=null;clearTimeout(reviewTimer);localStorage.setItem('bigdelta-project',id);render();break;
+    case 'project':currentId=id;comparison=null;reviewSession=null;packageFilter='all';clearTimeout(reviewTimer);localStorage.setItem('bigdelta-project',id);render();break;
     case 'tab':clearTimeout(reviewTimer);tab=id;render();break;
     case 'upload':uploadDialog();break;
     case 'revision':uploadDialog(id);break;
     case 'template':templateDialog();break;
     case 'compile':compileDialog();break;
+    case 'edit-doc':editDocumentDialog(id);break;
+    case 'pkg-filter':packageFilter=id;render();break;
+    case 'tpl-add':case 'tpl-up':case 'tpl-dn':case 'tpl-rm': {
+      if (!window._tSec) break;
+      if (window._tplSync) window._tplSync();
+      const ts=window._tSec, idx=parseInt(element.dataset.idx??'0');
+      if (name==='tpl-add') ts.push({name:'New section',type:'other',parent_name:null});
+      else if (name==='tpl-rm' && idx>=0 && idx<ts.length) { const rn=ts[idx].name; ts.splice(idx,1); ts.forEach(s=>{if(s.parent_name===rn)s.parent_name=null;}); }
+      else if (name==='tpl-up' && idx>0) { [ts[idx-1],ts[idx]]=[ts[idx],ts[idx-1]]; }
+      else if (name==='tpl-dn' && idx<ts.length-1) { [ts[idx],ts[idx+1]]=[ts[idx+1],ts[idx]]; }
+      if (window._tplRender) window._tplRender();
+      break;
+    }
     case 'new-change':changeDialog();break;
     case 'record':recordDialog();break;
     case 'resolve':modal('Record impact resolution',`<p>Confirm the affected document has been updated or reviewed. This records the resolution against its latest uploaded revision.</p>`+textarea('Resolution / review note','note','','required maxlength="4000"'),data=>mutate('resolve',{...data,change_id:id,document_id:element.dataset.document},'Impact resolution recorded.'));break;
@@ -204,13 +262,13 @@ async function action(name,id,element) {
     }
     case 'move': {
       const s=p.sections.find(s=>s.document_ids.includes(id));
-      modal('Move document',select('Destination section','section_id',p.sections.map(s=>[s.id,s.name]),s.id)+field('Position (1 = first)','position',1,'number','min="1" required'),data=>mutate('arrange',{...data,document_id:id,position:Number(data.position)-1},'Document moved.'));break;
+      modal('Move document',select('Destination section','section_id',p.sections.map(s=>[s.id,(s.parent_id?'  ':'')+s.name]),s.id)+field('Position (1 = first)','position',1,'number','min="1" required'),data=>mutate('arrange',{...data,document_id:id,position:Number(data.position)-1},'Document moved.'));break;
     }
     case 'history': {
       const d=p.documents[id];
       modal(`${d.title} / revisions`,d.revisions.slice().reverse().map(r=>`<div class="record"><div class="toolbar">${pill(r.label)}${link(r.id,'Download original ↗')}</div><div class="note">${esc(r.note)}</div><small>${esc(r.author)} · ${date(r.at)} · ${r.pages||'Attachment'} ${r.pages?'pages':''}</small><p class="help">${r.references.map(ref=>`Uses ${esc(p.documents[ref.document_id].title)} / ${esc(p.documents[ref.document_id].revisions.find(x=>x.id===ref.revision_id)?.label)}`).join('<br>')||'No document dependencies recorded.'}</p><p class="help">SHA-256: ${esc(r.sha256)}</p></div>`).join(''),async()=>{},'Close');break;
     }
-    case 'export-template':exportJSON('bigdelta-template.json',{name:p.name,sections:$('f-names').value.split('\n').map(s=>s.trim()).filter(Boolean)});break;
+    case 'export-template':if(window._tplSync)window._tplSync();exportJSON('bigdelta-template.json',{name:p.name,sections:window._tSec||p.sections.map(s=>({name:s.name,type:s.type||'other',parent_name:null}))});break;
     case 'export-project':exportJSON('bigdelta-project-register.json',p);toast('Register exported. Copy the full data folder to back up files too.');break;
     case 'compare-mode':renderComparison(id);break;
     case 'review-save':await saveReview();renderReviewResults();toast('Review decisions saved.');break;
