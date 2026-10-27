@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "BigDelta"
+version = "0.1.0"
+description = "Structural engineering project records and traceable PDF report packages"
+requires-python = ">=3.11"
+dependencies = ["pypdf==6.10.0", "reportlab==4.4.9", "pypdfium2==5.14.0", "Pillow==12.3.0"]
+
+[project.scripts]
+bigdelta = "bigdelta.server:main"
+
+[tool.setuptools.packages.find]
+include = ["bigdelta*"]
+
+[tool.setuptools.package-data]
+bigdelta = ["static/*"]
