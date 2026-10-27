@@ -1,1 +1,5 @@
 # BigDelta
+
+## Developers
+
+- Damian Valencia
