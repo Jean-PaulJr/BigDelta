@@ -30,7 +30,12 @@ function toast(message) {
   setTimeout(() => $('toast').hidden = true, 6000);
 }
 async function api(path, payload) {
-  const response = await fetch(path, payload === undefined ? {} : {method:'POST', headers:{'Content-Type':'application/json', 'X-BigDelta-Token':state.token}, body:JSON.stringify(payload)});
+  let response;
+  try {
+    response = await fetch(path, payload === undefined ? {} : {method:'POST', headers:{'Content-Type':'application/json', 'X-BigDelta-Token':state.token}, body:JSON.stringify(payload)});
+  } catch (error) {
+    throw new Error('Cannot reach BigDelta. Check its terminal window, restart the app if it stopped, then reload this page.');
+  }
   const data = await response.json();
   if (!response.ok) throw new Error(data.error || 'Request failed.');
   return data;

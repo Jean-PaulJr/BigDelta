@@ -21,6 +21,49 @@ def now():
     return datetime.now(timezone.utc).isoformat(timespec='seconds')
 
 
+def _windows_process_alive(pid):
+    """Query a process without sending a signal or requesting terminate access."""
+    import ctypes
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL('kernel32', use_last_error=True)
+    kernel.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+    kernel.OpenProcess.restype = wintypes.HANDLE
+    kernel.WaitForSingleObject.argtypes = (wintypes.HANDLE, wintypes.DWORD)
+    kernel.WaitForSingleObject.restype = wintypes.DWORD
+    kernel.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel.CloseHandle.restype = wintypes.BOOL
+    handle = kernel.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE only
+    if not handle:
+        error = ctypes.get_last_error()
+        if error == 87:  # ERROR_INVALID_PARAMETER: process no longer exists
+            return False
+        if error == 5:  # ERROR_ACCESS_DENIED: do not declare it dead
+            return True
+        raise ctypes.WinError(error)
+    try:
+        result = kernel.WaitForSingleObject(handle, 0)
+        if result == 0:  # WAIT_OBJECT_0: process exited
+            return False
+        if result == 258:  # WAIT_TIMEOUT: process still running
+            return True
+        raise ctypes.WinError(ctypes.get_last_error())
+    finally:
+        kernel.CloseHandle(handle)
+
+
+def _process_alive(pid):
+    # os.kill(pid, 0) terminates the target on Windows, including our server.
+    if os.name == 'nt':
+        return _windows_process_alive(pid)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
 def required(data, key, limit=500):
     value = str(data.get(key, '')).strip()
     if not value or len(value) > limit:
@@ -252,13 +295,9 @@ class Workspace:
 
     def _check_review_owner(self, pid, job):
         if job['status'] in ('queued', 'running') and job.get('owner_pid'):
-            try:
-                os.kill(job['owner_pid'], 0)
-            except ProcessLookupError:
+            if not _process_alive(job['owner_pid']):
                 job.update(status='failed', message='Previous application session stopped. Start a new comparison.', error='Review interrupted by application shutdown.')
                 self._save_review_job(pid, job)
-            except PermissionError:
-                pass
         return job
 
     def _save_review_job(self, pid, job):

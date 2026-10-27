@@ -55,3 +55,10 @@ macOS and Linux execution were not available. Portable source, launch instructio
 - Orion Revision 5 supplied pair (6,579 / 6,584 pages): approximately 10 seconds in this environment; 6,568 pages matched unchanged. The rules produced 118 reviewable candidates and retained 338 unclassified text/formula fragments separately. The 105 ksi / 50 ksi printed bolt-yield inconsistency was detected as a potential propagation finding. This automated candidate list is intentionally not represented as equivalent to the earlier 29-item manual engineering review.
 - Exported that real-package finding, reopened the 6,584-page PDF, verified a native `FreeTextCallout`, and visually inspected the rendered affected page. Existing reviewer annotations were preserved; the new callout was readable in its external margin.
 - Full browser interaction was not executed: Playwright's browser executable is absent in this environment. JavaScript syntax and live HTTP behavior were checked; desktop/browser UI interaction remains a validation limitation.
+
+## Windows calculation review connection fix - 27 October 2026
+
+- Replaced `os.kill(pid, 0)` on Windows with read-only process synchronization queries. Windows treats signal zero as process termination, so polling a running review could shut down the HTTP server and display "Failed to fetch".
+- Added a guarded module entry point and a useful connection-loss message in the interface.
+- All 48 unit tests passed. New regressions cover Windows API routing without signals, live/exited/inaccessible processes, handle cleanup on failure, and interrupted-job recovery. Windows API responses were mocked on Linux; native Windows execution was not available.
+- Live HTTP comparison, progress polling, decisions, callout export and download passed. JavaScript syntax, Python compilation and whitespace checks passed.
