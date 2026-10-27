@@ -9,7 +9,7 @@ import traceback
 import webbrowser
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import quote, urlsplit
 
 from .service import Workspace
 
@@ -40,7 +40,8 @@ def handler_for(workspace):
             self.send_header('Cache-Control', 'no-store')
             self.send_header('Content-Security-Policy', "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; object-src 'none'; frame-ancestors 'none'")
             if attachment:
-                self.send_header('Content-Disposition', 'attachment; filename="bigdelta-document.pdf"')
+                filename=attachment if isinstance(attachment,str) else 'bigdelta-document.pdf'
+                self.send_header('Content-Disposition', "attachment; filename*=UTF-8''"+quote(filename,safe=''))
             self.end_headers()
             self.wfile.write(body)
 
@@ -54,7 +55,7 @@ def handler_for(workspace):
             try:
                 if path == '/api/state':
                     projects = workspace.projects()
-                    return self.send(200, dict(projects=projects, checks={p['id']: workspace.check_project(p) for p in projects}, token=token))
+                    return self.send(200, dict(projects=projects, summaries=[workspace.project_summary(p) for p in projects], checks={p['id']: workspace.check_project(p) for p in projects}, token=token))
                 parts = path.strip('/').split('/')
                 if len(parts) in (4, 5) and parts[:2] == ['api', 'projects'] and parts[3] == 'reviews':
                     return self.send(200, workspace.review_jobs(parts[2]) if len(parts) == 4 else workspace._review_job(parts[2], parts[4]))
@@ -66,7 +67,7 @@ def handler_for(workspace):
                         match = next((r for r in all_files if r['id'] == file_id), None)
                         if match:
                             return self.send(200, workspace.file_path(match['file']).read_bytes(),
-                                             'application/pdf' if match.get('is_pdf', True) else 'application/octet-stream', True)
+                                             'application/pdf' if match.get('is_pdf', True) else 'application/octet-stream', match.get('filename',f'BigDelta-package-{match["id"][:8]}.pdf'))
                     return self.send(404, {'error': 'File not found.'})
                 if path.startswith('/manifest/'):
                     package_id = path.removeprefix('/manifest/')
@@ -102,7 +103,8 @@ def handler_for(workspace):
                     return self.send(201, workspace.create_project(data))
                 if len(parts) != 4 or parts[:2] != ['api', 'projects']:
                     return self.send(404, {'error': 'Action not found.'})
-                actions = dict(update=workspace.update_project, template=workspace.template,
+                actions = dict(update=workspace.update_project, details=workspace.update_details, cover=workspace.update_cover, task=workspace.save_task, rfi=workspace.save_rfi, template=workspace.template, section=workspace.update_section,
+                               section_add=workspace.add_section, section_delete=workspace.delete_section,
                                upload=workspace.upload, arrange=workspace.arrange, record=workspace.add_record,
                                change=workspace.add_change, resolve=workspace.resolve,
                                compile=workspace.compile, compare=workspace.compare,

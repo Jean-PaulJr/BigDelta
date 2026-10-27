@@ -14,6 +14,10 @@ BigDelta's Python, HTML, CSS, JavaScript, tests, and logo are original work crea
 
 These libraries are installed from the pinned requirements; this source archive does not redistribute dependency binaries. Their transitive dependencies and native wheels carry their own licenses. Preserve their packaged license notices when creating a standalone distribution.
 
+## Browser file saving
+
+Save As uses the native File System Access API (`showSaveFilePicker`, `createWritable`, `write`, `close`, and `abort`), documented in the [Chrome for Developers guide](https://developer.chrome.com/docs/capabilities/web-apis/file-system-access). Browsers without a save picker use an ordinary download. No additional browser library is used.
+
 ## Engineering code citations
 
 No engineering formula or specific adopted building-code provision is implemented or assumed. Project users record each code's title, adopted edition, section, and URL in **Project journal → Code citation**. These records are compiled into the final report. No proprietary standards text is bundled. User-provided calculation PDFs remain the engineering sources of record.

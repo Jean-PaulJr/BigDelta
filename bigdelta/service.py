@@ -7,10 +7,13 @@ import os
 import sqlite3
 import uuid
 from contextlib import contextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from pypdf import PdfReader
+
+PHASES = ['Planning', 'Design', 'Construction', 'Closeout']
+TASK_STATUSES = ['on hold', 'complete', 'in progress']
 
 
 def uid():
@@ -72,6 +75,17 @@ def required(data, key, limit=500):
 
 
 class Workspace:
+    @staticmethod
+    def normalize(p):
+        p.setdefault('rfis', [])
+        p.setdefault('cover', dict(generated_by='', checked_by='', approved_by=''))
+        if 'tasks' not in p:
+            p['legacy_progress'] = p.get('progress', 0)
+            p['tasks'] = []
+        total = len(p['tasks'])
+        p['progress'] = int(100 * sum(t['status'] == 'complete' for t in p['tasks']) / total + 0.5) if total else 0
+        return p
+
     def __init__(self, root):
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
@@ -91,6 +105,7 @@ class Workspace:
             conn.close()
 
     def save(self, p, action):
+        self.normalize(p)
         p['updated'] = now()
         p['events'].append({'at': now(), 'action': action})
         with self.connection() as conn:
@@ -100,44 +115,208 @@ class Workspace:
     def projects(self):
         with self.connection() as conn:
             rows = conn.execute('SELECT data FROM projects').fetchall()
-        return sorted([json.loads(x[0]) for x in rows], key=lambda p: p['updated'], reverse=True)
+        return sorted([self.normalize(json.loads(x[0])) for x in rows], key=lambda p: p['updated'], reverse=True)
 
     def project(self, pid):
         with self.connection() as conn:
             row = conn.execute('SELECT data FROM projects WHERE id=?', (pid,)).fetchone()
         if not row:
             raise ValueError('Project not found.')
-        return json.loads(row[0])
+        return self.normalize(json.loads(row[0]))
 
     def create_project(self, data):
         p = dict(id=uid(), name=required(data, 'name', 160), number=str(data.get('number', ''))[:80],
                  client=str(data.get('client', ''))[:160], phase='Planning', progress=0,
-                 documents={}, changes=[], records=[], packages=[], events=[], sections=[])
+                 documents={}, changes=[], records=[], packages=[], events=[], sections=[], tasks=[])
         for name in ['Design basis', 'Gravity systems', 'Lateral systems', 'Foundations', 'Drawings', 'Specifications']:
             p['sections'].append(dict(id=uid(), name=name, document_ids=[]))
         return self.save(p, 'Project created')
 
     def update_project(self, pid, data):
         p = self.project(pid)
-        if data.get('phase') not in ['Planning', 'Design', 'Construction', 'Closeout']:
+        if data.get('phase') not in PHASES:
             raise ValueError('Choose a valid project phase.')
-        value = int(data.get('progress', 0))
-        if not 0 <= value <= 100:
-            raise ValueError('Progress must be from 0 to 100.')
-        p.update(phase=data['phase'], progress=value)
-        return self.save(p, f'Progress updated: {value}% / {p["phase"]}')
+        p['phase'] = data['phase']
+        return self.save(p, f'Current phase changed to {p["phase"]}')
+
+    @staticmethod
+    def project_summary(p):
+        tasks=p['tasks']
+        complete=sum(t['status']=='complete' for t in tasks)
+        status='No tasks' if not tasks else 'Complete' if complete==len(tasks) else 'In progress' if any(t['status']=='in progress' for t in tasks) else 'On hold'
+        return dict(id=p['id'],name=p['name'],number=p['number'],client=p['client'],phase=p['phase'],
+            status=status,progress=p['progress'],completed_tasks=complete,total_tasks=len(tasks),
+            open_rfis=sum(r['status']=='Open' for r in p['rfis']),closed_rfis=sum(r['status']=='Closed' for r in p['rfis']),
+            documents=len(p['documents']),coordination_items=len(Workspace.check_project(p)),updated=p['updated'])
+
+    @staticmethod
+    def apply_details(p, data):
+        for key, limit in [('name',160),('number',80),('client',160)]:
+            if key in data:
+                value=str(data[key]).strip()
+                if len(value)>limit or (key=='name' and not value):
+                    raise ValueError(f'Project {key} must contain {"1-" if key=="name" else "at most "}{limit} characters.')
+                p[key]=value
+
+    def update_details(self, pid, data):
+        p=self.project(pid)
+        self.apply_details(p,data)
+        return self.save(p,'Project name, number, and client updated')
+
+    def update_cover(self, pid, data):
+        p=self.project(pid)
+        self.apply_details(p,data)
+        for key in ['generated_by','checked_by','approved_by']:
+            if key in data:
+                value=str(data[key]).strip()
+                if len(value)>160:
+                    raise ValueError('Cover review names must be no longer than 160 characters.')
+                p['cover'][key]=value
+        return self.save(p,'Report cover page updated')
+
+    def save_rfi(self, pid, data):
+        p=self.project(pid)
+        rfi_id=data.get('rfi_id')
+        existing=next((r for r in p['rfis'] if r['id']==rfi_id),None)
+        if rfi_id and not existing:
+            raise ValueError('RFI not found in this project.')
+        rfi=dict(existing) if existing else dict(id=uid(),number=f'RFI-{len(p["rfis"])+1:03d}',
+            description='',requested_by='',sent_to='',sent_date='',response='',status='Open',created=now())
+        for key in ['description','requested_by','sent_to','sent_date','response','status']:
+            if key in data:
+                rfi[key]=str(data[key]).strip()
+        for key,limit in [('description',6000),('requested_by',160),('sent_to',160),('sent_date',10)]:
+            rfi[key]=required(rfi,key,limit)
+        if rfi['status'] not in ['Open','Closed']:
+            raise ValueError('RFI status must be Open or Closed.')
+        if len(rfi['response'])>12000:
+            raise ValueError('RFI response must be no longer than 12000 characters.')
+        try:
+            if date.fromisoformat(rfi['sent_date']).isoformat()!=rfi['sent_date']:
+                raise ValueError()
+        except ValueError as exc:
+            raise ValueError('Enter a valid date sent in YYYY-MM-DD format.') from exc
+        rfi['updated']=now()
+        if existing:
+            p['rfis'][p['rfis'].index(existing)]=rfi
+        else:
+            p['rfis'].append(rfi)
+        return self.save(p,f'{rfi["number"]} {"updated" if existing else "added"}: {rfi["status"]}; {rfi["requested_by"]} to {rfi["sent_to"]}')
+
+    def save_task(self, pid, data):
+        p = self.project(pid)
+        task_id = data.get('task_id')
+        existing = next((t for t in p['tasks'] if t['id'] == task_id), None)
+        if task_id and not existing:
+            raise ValueError('Task not found in this project.')
+        task = dict(existing) if existing else dict(id=uid(), title='', phase=p['phase'], status='in progress',
+                                                  estimated_date='', completed_date='', notes='', created=now())
+        for key in ['title', 'phase', 'status', 'estimated_date', 'completed_date', 'notes']:
+            if key in data:
+                task[key] = str(data[key]).strip()
+        task['title'] = required(task, 'title', 240)
+        if task['phase'] not in PHASES or task['status'] not in TASK_STATUSES:
+            raise ValueError('Choose a valid task phase and status.')
+        if len(task['notes']) > 6000:
+            raise ValueError('Task notes must be no longer than 6000 characters.')
+        if task['status'] != 'complete':
+            task['completed_date'] = ''
+        if task['status'] == 'complete' and not task['completed_date']:
+            raise ValueError('Enter an actual completion date for a complete task.')
+        for key in ['estimated_date', 'completed_date']:
+            value = task[key]
+            if value:
+                try:
+                    if date.fromisoformat(value).isoformat() != value:
+                        raise ValueError()
+                except ValueError as exc:
+                    raise ValueError('Task dates must be valid calendar dates in YYYY-MM-DD format.') from exc
+        task['updated'] = now()
+        if existing:
+            p['tasks'][p['tasks'].index(existing)] = task
+        else:
+            p['tasks'].append(task)
+        return self.save(p, f'Task {"updated" if existing else "added"}: {task["title"]} / {task["phase"]} / {task["status"]}')
 
     def template(self, pid, data):
         p = self.project(pid)
-        names = [str(x).strip() for x in data.get('names', [])]
-        if not names or len(names) > 100 or any(not n or len(n) > 120 for n in names) or len(set(names)) != len(names):
+        existing = {s['id']: s for s in p['sections']}
+        by_name = {s['name']: s for s in p['sections']}
+        rows = data.get('sections')
+        if rows is None:
+            rows = [dict(id=by_name[n]['id'] if n in by_name else None, name=n)
+                    for n in [str(x).strip() for x in data.get('names', [])]]
+        if not isinstance(rows, list) or not rows or len(rows) > 100 or any(not isinstance(r, dict) for r in rows):
+            raise ValueError('Enter 1-100 report sections.')
+        names = [required(r, 'name', 120) for r in rows]
+        if len({n.casefold() for n in names}) != len(names):
             raise ValueError('Enter 1-100 unique section names, up to 120 characters each.')
+        ids = [r.get('id') for r in rows if r.get('id')]
+        if len(set(ids)) != len(ids) or any(sid not in existing for sid in ids):
+            raise ValueError('Section IDs must be unique and belong to this project.')
         for s in p['sections']:
-            if s['name'] not in names and s['document_ids']:
+            if s['id'] not in ids and s['document_ids']:
                 raise ValueError(f'Move documents out of "{s["name"]}" before removing the section.')
-        existing = {s['name']: s for s in p['sections']}
-        p['sections'] = [existing.get(n, dict(id=uid(), name=n, document_ids=[])) for n in names]
+        p['sections'] = [dict(id=r.get('id') or uid(), name=name,
+                              included=existing[r['id']].get('included', True) if r.get('id') else True,
+                              document_ids=existing[r['id']]['document_ids'] if r.get('id') else [])
+                         for r, name in zip(rows, names)]
         return self.save(p, 'Report template updated')
+
+    def update_section(self, pid, data):
+        p = self.project(pid)
+        section = next((s for s in p['sections'] if s['id'] == data.get('section_id')), None)
+        if not section:
+            raise ValueError('Section not found in this project.')
+        if 'included' in data:
+            if not isinstance(data['included'], bool):
+                raise ValueError('Section inclusion must be true or false.')
+            section['included'] = data['included']
+        old_name = section['name']
+        if 'name' in data:
+            name = required(data, 'name', 120)
+            if any(s['id'] != section['id'] and s['name'].casefold() == name.casefold() for s in p['sections']):
+                raise ValueError('A section with this title already exists.')
+            section['name'] = name
+        if 'position' in data:
+            position = int(data['position'])
+            if not 0 <= position < len(p['sections']):
+                raise ValueError('Choose a position within the report sections.')
+            p['sections'].remove(section)
+            p['sections'].insert(position, section)
+        return self.save(p, f'Section updated: {old_name} -> {section["name"]}, position {p["sections"].index(section)+1}, included in report: {section.get("included", True)}')
+
+    def add_section(self, pid, data):
+        p = self.project(pid)
+        name = required(data, 'name', 120)
+        if len(p['sections']) >= 100:
+            raise ValueError('A report can contain up to 100 sections.')
+        if any(s['name'].casefold() == name.casefold() for s in p['sections']):
+            raise ValueError('A section with this title already exists.')
+        position = int(data.get('position', len(p['sections'])))
+        if not 0 <= position <= len(p['sections']):
+            raise ValueError('Choose a position within the report sections.')
+        p['sections'].insert(position, dict(id=uid(), name=name, document_ids=[]))
+        return self.save(p, f'Section added: {name}, position {position+1}')
+
+    def delete_section(self, pid, data):
+        p = self.project(pid)
+        section = next((s for s in p['sections'] if s['id'] == data.get('section_id')), None)
+        if not section:
+            raise ValueError('Section not found in this project.')
+        if len(p['sections']) == 1:
+            raise ValueError('Keep at least one report section. Add another section before deleting this one.')
+        destination = None
+        if section['document_ids']:
+            destination = next((s for s in p['sections'] if s['id'] == data.get('destination_id') and s['id'] != section['id']), None)
+            if not destination:
+                raise ValueError('Choose another section to receive the documents before deleting this section.')
+            destination['document_ids'].extend(section['document_ids'])
+        p['sections'].remove(section)
+        action = f'Section deleted: {section["name"]}'
+        if destination:
+            action += f'; {len(section["document_ids"])} documents moved to {destination["name"]}'
+        return self.save(p, action)
 
     def upload(self, pid, data):
         p = self.project(pid)
@@ -263,7 +442,8 @@ class Workspace:
         issue = bool(data.get('issue', False))
         if issue and warnings:
             raise ValueError('Issue blocked. Resolve all change impacts and stale references first.')
-        package = compile_report(p, self, data, warnings)
+        options={**p['cover'],**data}
+        package = compile_report(p, self, options, warnings)
         p['packages'].append(package)
         self.save(p, f'{"Issued" if issue else "Draft"} package compiled: {package["id"][:8]}')
         return package

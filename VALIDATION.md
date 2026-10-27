@@ -8,7 +8,14 @@ Validated on Windows with Python 3.12.14 and the exact dependency versions in re
 - Implemented SQLite workspace operations, report compilation, and drawing comparison against those tests.
 - Added HTTP integration and stronger PDF destination/source-integrity/overlay checks. Observed the new checks fail, then corrected explicit PDF page destinations, source checksum verification, and overlay channels.
 - Added an annotated-PDF regression after a real project exposed untyped dictionary keys in the footer annotation translation. Observed the exact "Key must be a PdfObject" failure, then corrected both rectangle and quad-point keys to `NameObject` and checked their translated coordinates and retained URL.
-- Final automated result: **25 tests passed** using `python -m unittest discover -s tests -v`.
+- Added section-editing tests covering occupied-section renaming, stable document/revision identity, structured template edits, invalid edits, PDF section order/titles, unchanged historic packages, and the section HTTP endpoint.
+- Added section lifecycle coverage for adding at a chosen position, deleting empty sections, moving documents when deleting occupied sections, retaining revisions, minimum-section validation, and both HTTP endpoints.
+- Added task tests for derived completion percentages, status transitions, editable calendar dates, persistence, phase changes, invalid input, legacy-project migration, and the task HTTP endpoint.
+- Added editable project identity and saved cover tests, including persistent reviewer values, atomic input validation, immutable historic covers, cover text extraction, HTTP editing routes, PDF download bytes, and suggested filenames.
+- Added RFI numbering, per-project isolation, editable response/status/date persistence, invalid input, reopening, and HTTP endpoint tests.
+- Added all-project summary status, task totals, RFI totals, and state endpoint coverage.
+- Final automated result: **51 Python tests passed** using `python -m unittest discover -s tests -v`.
+- **4 Save As checks passed** using `node tests/test_save_as.cjs`: picker-before-download ordering, PDF write/close, cancellation, write-failure abort, and the ordinary-download fallback. These use isolated browser/file-picker adapters; cross-browser native picker behavior remains browser-dependent.
 - Browser JavaScript syntax checked with `node --check bigdelta/static/app.js`.
 
 ## Automated coverage
@@ -62,3 +69,8 @@ macOS and Linux execution were not available. Portable source, launch instructio
 - Added a guarded module entry point and a useful connection-loss message in the interface.
 - All 48 unit tests passed. New regressions cover Windows API routing without signals, live/exited/inaccessible processes, handle cleanup on failure, and interrupted-job recovery. Windows API responses were mocked on Linux; native Windows execution was not available.
 - Live HTTP comparison, progress polling, decisions, callout export and download passed. JavaScript syntax, Python compilation and whitespace checks passed.
+## Integrated merge verification — 2026-10-27 (Windows)
+
+Merged the project overview, task tracking, RFIs, cover editor, Save As, project summary, and report section controls with GitHub main at `4c3d1b9`, retaining calculation revision review and the Windows process-liveness fix.
+
+All 77 Python unittest cases passed, along with four Save As checks and JavaScript syntax validation. Section-selection regression tests cover omission from compiled contents, persistence across reopening and template edits, re-inclusion, unchanged prior manifests, document retention, invalid values, and rejection when every PDF section is excluded. Browser verification confirmed the checkbox persists after refresh and can be re-enabled.

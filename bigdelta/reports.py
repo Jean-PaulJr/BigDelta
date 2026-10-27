@@ -2,6 +2,7 @@
 import io
 import math
 import hashlib
+import re
 from html import escape
 
 from pypdf import PdfReader, PdfWriter, Transformation
@@ -77,6 +78,8 @@ def compile_report(p, workspace, options, warnings):
     status = 'ISSUED' if issue else 'DRAFT - FOR REVIEW'
     entries, parts, manifest = [], [], []
     for section in p['sections']:
+        if not section.get('included', True):
+            continue
         docs = [(p['documents'][did], p['documents'][did]['revisions'][-1]) for did in section['document_ids']]
         docs = [(d, r) for d, r in docs if r['is_pdf']]
         if not docs:
@@ -179,10 +182,13 @@ def compile_report(p, workspace, options, warnings):
         c.save()
         page.merge_page(PdfReader(io.BytesIO(stream.getvalue())).pages[0])
     package_id = uid()
+    stem=re.sub(r'[^A-Za-z0-9._-]+','-',f'{p["number"]}-{p["name"]}').strip('-')[:110] or 'BigDelta'
+    filename=f'{stem}-{"issued" if issue else "draft"}-{package_id[:8]}.pdf'
     relative = f'files/{package_id}.pdf'
     writer.add_metadata({'/Title': f'{p["name"]} - {status}', '/Author': 'BigDelta', '/Subject': 'Structural engineering report package'})
     writer.write(workspace.file_path(relative))
     for m in manifest:
         m['start_page'] = front_count + m.pop('offset') + 1
-    return dict(id=package_id, file=relative, at=now(), issue=issue, page_count=total,
+    return dict(id=package_id, file=relative, filename=filename, at=now(), issue=issue, page_count=total,
+                cover={**{k:p[k] for k in ['name','number','client']},**{k:str(options.get(k,'')) for k in ['generated_by','checked_by','approved_by']}},
                 manifest=manifest, warnings=warnings, approvals={k: str(options.get(k, ''))[:160] for k in ['generated_by', 'checked_by', 'approved_by']})

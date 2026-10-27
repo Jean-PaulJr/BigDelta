@@ -85,11 +85,270 @@ class WorkspaceTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.ws.create_project({'name': '  '})
 
+    def test_section_selection_controls_pdf_contents_and_preserves_documents(self):
+        kept = self.upload('Included calculation')
+        sid = self.p['sections'][1]['id']
+        omitted = self.upload('Excluded calculation', section_id=sid)
+        first = self.ws.compile(self.pid, {})
+        self.ws.update_section(self.pid, {'section_id': sid, 'included': False})
+        result = self.ws.compile(self.pid, {})
+        self.assertEqual([m['document_id'] for m in result['manifest']], [kept['id']])
+        text = '\n'.join(page.extract_text() for page in PdfReader(self.ws.file_path(result['file'])).pages)
+        self.assertNotIn('Excluded calculation', text)
+        self.assertEqual(len(first['manifest']), 2)
+        saved = Workspace(Path(self.temp.name)).project(self.pid)
+        self.assertIn(omitted['id'], saved['documents'])
+        self.assertFalse(saved['sections'][1]['included'])
+        # Editing titles/order must preserve the inclusion setting.
+        saved = self.ws.template(self.pid, {'sections': [{'id': s['id'], 'name': s['name']} for s in saved['sections']]})
+        self.assertFalse(saved['sections'][1]['included'])
+        self.ws.update_section(self.pid, {'section_id': sid, 'included': True})
+        self.assertEqual(len(self.ws.compile(self.pid, {})['manifest']), 2)
+
+    def test_excluding_every_pdf_section_rejects_empty_package(self):
+        self.upload()
+        self.ws.update_section(self.pid, {'section_id': self.section, 'included': False})
+        with self.assertRaises(ValueError):
+            self.ws.compile(self.pid, {})
+
+    def test_section_inclusion_requires_a_boolean(self):
+        with self.assertRaises(ValueError):
+            self.ws.update_section(self.pid, {'section_id': self.section, 'included': 'false'})
+
+    def test_rfis_are_numbered_and_isolated_by_project(self):
+        data={'description':'Confirm opening size','requested_by':'Engineer A','sent_to':'Architect B','sent_date':'2026-10-27','status':'Open'}
+        p=self.ws.save_rfi(self.pid,data)
+        self.assertEqual(p['rfis'][0]['number'],'RFI-001')
+        p=self.ws.save_rfi(self.pid,{**data,'description':'Confirm bearing elevation'})
+        self.assertEqual(p['rfis'][1]['number'],'RFI-002')
+        other=self.ws.create_project({'name':'Other'})
+        self.assertEqual(other['rfis'],[])
+        other=self.ws.save_rfi(other['id'],data)
+        self.assertEqual(other['rfis'][0]['number'],'RFI-001')
+        with self.assertRaises(ValueError):
+            self.ws.save_rfi(other['id'],{'rfi_id':p['rfis'][0]['id'],'status':'Closed'})
+
+    def test_rfi_response_status_and_dates_can_be_edited_and_persisted(self):
+        p=self.ws.save_rfi(self.pid,{'description':'Confirm opening','requested_by':'Alex','sent_to':'Sam','sent_date':'2026-10-27'})
+        rfi=p['rfis'][0]
+        self.assertEqual(rfi['status'],'Open')
+        p=self.ws.save_rfi(self.pid,{'rfi_id':rfi['id'],'response':'Use revised detail 3/S201','status':'Closed','sent_date':'2026-10-26'})
+        reopened=Workspace(Path(self.temp.name)).project(self.pid)
+        self.assertEqual(reopened['rfis'][0]['number'],'RFI-001')
+        self.assertEqual(reopened['rfis'][0]['response'],'Use revised detail 3/S201')
+        self.assertEqual(reopened['rfis'][0]['status'],'Closed')
+        p=self.ws.save_rfi(self.pid,{'rfi_id':rfi['id'],'status':'Open'})
+        self.assertEqual(p['rfis'][0]['response'],'Use revised detail 3/S201')
+        self.assertEqual(p['rfis'][0]['sent_date'],'2026-10-26')
+
+    def test_invalid_rfi_edits_do_not_change_project(self):
+        before=self.ws.project(self.pid)
+        data={'description':'Question','requested_by':'Alex','sent_to':'Sam','sent_date':'2026-10-27'}
+        for changes in [{'description':''},{'requested_by':''},{'sent_to':''},{'sent_date':'2026-02-30'},{'status':'In progress'},{'rfi_id':'missing'}]:
+            with self.assertRaises(ValueError):
+                self.ws.save_rfi(self.pid,{**data,**changes})
+        self.assertEqual(self.ws.project(self.pid),before)
+
+    def test_project_summary_shows_task_status_and_rfi_counts(self):
+        p=self.ws.project(self.pid)
+        self.assertEqual(self.ws.project_summary(p)['status'],'No tasks')
+        p=self.ws.save_task(self.pid,{'title':'Plan','phase':'Planning','status':'on hold'})
+        self.assertEqual(self.ws.project_summary(p)['status'],'On hold')
+        first=p['tasks'][0]
+        p=self.ws.save_task(self.pid,{'title':'Design','phase':'Design','status':'in progress'})
+        self.assertEqual(self.ws.project_summary(p)['status'],'In progress')
+        p=self.ws.save_task(self.pid,{'task_id':first['id'],'status':'complete','completed_date':'2026-10-27'})
+        p=self.ws.save_task(self.pid,{'task_id':p['tasks'][1]['id'],'status':'complete','completed_date':'2026-10-27'})
+        p=self.ws.save_rfi(self.pid,{'description':'Question','requested_by':'Alex','sent_to':'Sam','sent_date':'2026-10-27'})
+        summary=self.ws.project_summary(p)
+        self.assertEqual(summary['status'],'Complete')
+        self.assertEqual(summary['progress'],100)
+        self.assertEqual(summary['completed_tasks'],2)
+        self.assertEqual(summary['total_tasks'],2)
+        self.assertEqual(summary['open_rfis'],1)
+        self.assertEqual(summary['closed_rfis'],0)
+        self.assertEqual(summary['name'],'River House')
+
+    def test_project_details_are_editable_and_persistent(self):
+        p=self.ws.update_details(self.pid, {'name':'Revised House','number':'BD-101','client':'Client Studio'})
+        reopened=Workspace(Path(self.temp.name)).project(self.pid)
+        self.assertEqual((reopened['name'],reopened['number'],reopened['client']),('Revised House','BD-101','Client Studio'))
+        self.assertEqual(p['phase'],'Planning')
+        with self.assertRaises(ValueError):
+            self.ws.update_details(self.pid, {'name':''})
+
+    def test_saved_cover_values_are_used_in_compiled_pdf(self):
+        self.upload()
+        self.ws.update_cover(self.pid, {'name':'Cover House','number':'BD-77','client':'Example Client',
+            'generated_by':'Alex Engineer','checked_by':'Sam Reviewer','approved_by':'Jo Approver'})
+        result=self.ws.compile(self.pid,{})
+        text=PdfReader(self.ws.file_path(result['file'])).pages[0].extract_text()
+        for value in ['Cover House','BD-77','Example Client','Alex Engineer','Sam Reviewer','Jo Approver','Generated','Checked','Approved']:
+            self.assertIn(value.lower(),text.lower())
+        self.assertEqual(result['cover']['client'],'Example Client')
+        self.assertEqual(result['approvals']['checked_by'],'Sam Reviewer')
+        self.assertTrue(result['filename'].endswith('.pdf'))
+
+    def test_cover_edits_do_not_rewrite_prior_packages(self):
+        self.upload()
+        self.ws.update_cover(self.pid, {'generated_by':'First Engineer'})
+        first=self.ws.compile(self.pid,{})
+        original=self.ws.file_path(first['file']).read_bytes()
+        self.ws.update_cover(self.pid, {'name':'Changed name','generated_by':'New Engineer'})
+        second=self.ws.compile(self.pid,{})
+        self.assertEqual(self.ws.file_path(first['file']).read_bytes(),original)
+        self.assertEqual(self.ws.project(self.pid)['packages'][0]['cover']['name'],'River House')
+        self.assertEqual(second['cover']['name'],'Changed name')
+
+    def test_invalid_cover_is_rejected_atomically(self):
+        before=self.ws.project(self.pid)
+        with self.assertRaises(ValueError):
+            self.ws.update_cover(self.pid, {'name':'Should not save','checked_by':'x'*161})
+        self.assertEqual(self.ws.project(self.pid),before)
+
+    def test_task_progress_is_derived_from_complete_tasks(self):
+        p=self.ws.save_task(self.pid, {'title':'Confirm criteria','phase':'Planning','status':'complete','completed_date':'2026-10-27','estimated_date':'2026-10-26'})
+        self.assertEqual(p['progress'],100)
+        first=p['tasks'][0]
+        p=self.ws.save_task(self.pid, {'title':'Design framing','phase':'Design','status':'in progress','estimated_date':'2026-11-05'})
+        self.assertEqual(p['progress'],50)
+        p=self.ws.save_task(self.pid, {'title':'Review submittal','phase':'Construction','status':'on hold'})
+        self.assertEqual(p['progress'],33)
+        p=self.ws.save_task(self.pid, {'task_id':first['id'],'title':'Confirm updated criteria','status':'in progress'})
+        self.assertEqual(p['progress'],0)
+        self.assertEqual(p['tasks'][0]['completed_date'],'')
+        self.assertEqual(p['tasks'][0]['estimated_date'],'2026-10-26')
+        self.assertEqual(len(p['tasks']),3)
+
+    def test_tasks_persist_with_editable_dates_and_phase(self):
+        p=self.ws.save_task(self.pid, {'title':'Foundation design','phase':'Design','status':'on hold','estimated_date':'2026-11-02','notes':'Await geotechnical report'})
+        task=p['tasks'][0]
+        p=self.ws.save_task(self.pid, {'task_id':task['id'],'phase':'Closeout','status':'complete','completed_date':'2026-11-04','estimated_date':'2026-11-03'})
+        reopened=Workspace(Path(self.temp.name)).project(self.pid)
+        self.assertEqual(reopened['tasks'][0]['id'],task['id'])
+        self.assertEqual(reopened['tasks'][0]['phase'],'Closeout')
+        self.assertEqual(reopened['tasks'][0]['completed_date'],'2026-11-04')
+        self.assertEqual(reopened['tasks'][0]['notes'],'Await geotechnical report')
+        self.assertEqual(reopened['progress'],100)
+
+    def test_invalid_task_values_leave_project_unchanged(self):
+        before=self.ws.project(self.pid)
+        for changes in [dict(title=''),dict(status='unknown'),dict(phase='Unknown'),dict(estimated_date='2026-02-30'),dict(status='complete'),dict(task_id='foreign')]:
+            with self.assertRaises(ValueError):
+                self.ws.save_task(self.pid, {'title':'Task','phase':'Planning','status':'in progress',**changes})
+        self.assertEqual(self.ws.project(self.pid),before)
+
+    def test_legacy_projects_gain_task_list_without_losing_documents(self):
+        d=self.upload()
+        p=self.ws.project(self.pid)
+        p.pop('tasks',None)
+        p['progress']=75
+        with self.ws.connection() as conn:
+            import json
+            conn.execute('UPDATE projects SET data=? WHERE id=?',(json.dumps(p),self.pid))
+        p=self.ws.project(self.pid)
+        self.assertEqual(p['tasks'],[])
+        self.assertEqual(p['progress'],0)
+        self.assertEqual(p['legacy_progress'],75)
+        self.assertEqual(p['documents'][d['id']],d)
+
+    def test_project_phase_changes_cannot_override_task_progress(self):
+        self.ws.save_task(self.pid, {'title':'Plan','phase':'Planning','status':'complete','completed_date':'2026-10-27'})
+        p=self.ws.update_project(self.pid, {'phase':'Design','progress':12})
+        self.assertEqual(p['phase'],'Design')
+        self.assertEqual(p['progress'],100)
+
     def test_template_can_remove_empty_section_but_not_occupied(self):
         self.upload()
         self.ws.template(self.pid, {'names': ['Design basis', 'Custom framing']})
         with self.assertRaises(ValueError):
             self.ws.template(self.pid, {'names': ['Footings']})
+
+    def test_rename_occupied_section_preserves_documents_and_revisions(self):
+        document = self.upload()
+        self.ws.update_section(self.pid, {'section_id':self.section, 'name':'Project design criteria'})
+        saved = self.ws.project(self.pid)
+        self.assertEqual(saved['sections'][0]['id'], self.section)
+        self.assertEqual(saved['sections'][0]['name'], 'Project design criteria')
+        self.assertEqual(saved['sections'][0]['document_ids'], [document['id']])
+        self.assertEqual(saved['documents'][document['id']], document)
+
+    def test_section_order_and_titles_drive_compiled_package(self):
+        a = self.upload('Design criteria PDF', content=pdf('Criteria source'))
+        second = self.p['sections'][1]['id']
+        b = self.upload('Framing PDF', section_id=second, content=pdf('Framing source'))
+        before = self.ws.compile(self.pid, {})
+        original = self.ws.file_path(before['file']).read_bytes()
+        self.ws.update_section(self.pid, {'section_id':second, 'name':'Structural framing', 'position':0})
+        after = self.ws.compile(self.pid, {})
+        self.assertEqual([x['document_id'] for x in after['manifest']], [b['id'],a['id']])
+        reader = PdfReader(self.ws.file_path(after['file']))
+        self.assertIn('Structural framing', reader.pages[1].extract_text())
+        self.assertIn('Structural framing', reader.pages[2].extract_text())
+        self.assertIn('Framing source', reader.pages[3].extract_text())
+        self.assertEqual(self.ws.file_path(before['file']).read_bytes(), original)
+
+    def test_structured_template_can_rename_and_reorder_occupied_sections(self):
+        d = self.upload()
+        rows = [{'id':s['id'], 'name':s['name']} for s in self.p['sections']]
+        rows[0]['name'] = 'General criteria'
+        rows.reverse()
+        saved = self.ws.template(self.pid, {'sections':rows})
+        self.assertEqual(saved['sections'][-1]['id'], self.section)
+        self.assertEqual(saved['sections'][-1]['name'], 'General criteria')
+        self.assertEqual(saved['sections'][-1]['document_ids'], [d['id']])
+
+    def test_invalid_section_edits_do_not_change_project(self):
+        before = self.ws.project(self.pid)
+        for payload in [
+            {'section_id':self.section,'name':''},
+            {'section_id':self.section,'name':self.p['sections'][1]['name'].upper()},
+            {'section_id':'unknown','name':'New name'},
+            {'section_id':self.section,'position':-1},
+            {'section_id':self.section,'position':999},
+        ]:
+            with self.assertRaises(ValueError):
+                self.ws.update_section(self.pid,payload)
+        with self.assertRaises(ValueError):
+            self.ws.template(self.pid, {'sections':[{'id':self.section,'name':'A'},{'id':self.section,'name':'B'}]})
+        with self.assertRaises(ValueError):
+            self.ws.template(self.pid, {'sections':[{'id':'unknown','name':'A'}]})
+        self.assertEqual(self.ws.project(self.pid), before)
+
+    def test_add_section_at_selected_position(self):
+        saved = self.ws.add_section(self.pid, {'name':'Connections', 'position':1})
+        self.assertEqual(saved['sections'][1]['name'], 'Connections')
+        self.assertEqual(saved['sections'][1]['document_ids'], [])
+        self.assertEqual(len(saved['sections']), len(self.p['sections'])+1)
+        with self.assertRaises(ValueError):
+            self.ws.add_section(self.pid, {'name':'CONNECTIONS'})
+
+    def test_delete_empty_section_keeps_other_sections(self):
+        sid=self.p['sections'][1]['id']
+        saved=self.ws.delete_section(self.pid, {'section_id':sid})
+        self.assertEqual([s['id'] for s in saved['sections']], [s['id'] for s in self.p['sections'] if s['id']!=sid])
+
+    def test_delete_occupied_section_moves_documents_and_preserves_history(self):
+        d=self.upload()
+        target=self.p['sections'][1]['id']
+        existing=self.upload('Already in destination',section_id=target)
+        with self.assertRaises(ValueError):
+            self.ws.delete_section(self.pid, {'section_id':self.section})
+        with self.assertRaises(ValueError):
+            self.ws.delete_section(self.pid, {'section_id':self.section,'destination_id':self.section})
+        saved=self.ws.delete_section(self.pid, {'section_id':self.section,'destination_id':target})
+        self.assertNotIn(self.section,[s['id'] for s in saved['sections']])
+        self.assertEqual(next(s for s in saved['sections'] if s['id']==target)['document_ids'],[existing['id'],d['id']])
+        self.assertEqual(saved['documents'][d['id']],d)
+
+    def test_cannot_delete_last_section_or_section_from_another_project(self):
+        self.ws.template(self.pid, {'names':['Only section']})
+        p=self.ws.project(self.pid)
+        with self.assertRaises(ValueError):
+            self.ws.delete_section(self.pid, {'section_id':p['sections'][0]['id']})
+        with self.assertRaises(ValueError):
+            self.ws.delete_section(self.pid, {'section_id':'unknown'})
+        self.assertEqual(self.ws.project(self.pid),p)
 
     def test_reorder_requires_exact_same_documents(self):
         a, b = self.upload('A'), self.upload('B')
