@@ -17,3 +17,9 @@ These libraries are installed from the pinned requirements; this source archive 
 ## Engineering code citations
 
 No engineering formula or specific adopted building-code provision is implemented or assumed. Project users record each code's title, adopted edition, section, and URL in **Project journal → Code citation**. These records are compiled into the final report. No proprietary standards text is bundled. User-provided calculation PDFs remain the engineering sources of record.
+
+## Calculation revision review
+
+- PyMuPDF 1.26.6: PDF text/location extraction, page matching resources, and native `FreeTextCallout` annotations. Official API: https://pymupdf.readthedocs.io/en/latest/page.html#Page.add_freetext_annot . License information: https://pymupdf.readthedocs.io/en/latest/about.html#license-and-copyright . Review the applicable PyMuPDF licensing terms before distributing a derivative application.
+- Python standard library `concurrent.futures.ProcessPoolExecutor`: isolated background comparisons so MuPDF operations do not share threads.
+- The rule categories and exclusions implement the project owner's calculation-review requirements; they are not engineering-code compliance rules.

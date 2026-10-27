@@ -45,3 +45,13 @@ Rendered the five-page example package with PDFium and Poppler and inspected the
 ## Limits of verification
 
 macOS and Linux execution were not available. Portable source, launch instructions, browser-native SVG branding, and platform-neutral storage paths are included. No standalone native installer or multiuser deployment was built. Structural correctness, professional approval, semantic drawing understanding, full multilingual typesetting, and full interoperability with every PDF producer are outside the verified scope.
+
+
+## Calculation revision review - 27 October 2026
+
+- `python -m unittest discover -s tests -v`: 42 tests passed, including inserted-page alignment, exclusion of node-load tables/continuations/assignments, same-section result grouping, pass/fail transitions in both directions, formula-outcome filtering, moved checks, graphics coverage gaps, inconsistent printed bolt strengths, native callout intent/leader arrays, source preservation, source-hash protection, background process execution, review editing/export, and project isolation.
+- `node --check bigdelta/static/app.js` and `git diff --check`: passed.
+- Live local HTTP exercise: start the real application, compare uploaded revisions in a spawned worker, poll progress, include findings, save decisions, export a PDF, and download it through the existing authorized-file route. Passed with two exported callouts.
+- Orion Revision 5 supplied pair (6,579 / 6,584 pages): approximately 10 seconds in this environment; 6,568 pages matched unchanged. The rules produced 118 reviewable candidates and retained 338 unclassified text/formula fragments separately. The 105 ksi / 50 ksi printed bolt-yield inconsistency was detected as a potential propagation finding. This automated candidate list is intentionally not represented as equivalent to the earlier 29-item manual engineering review.
+- Exported that real-package finding, reopened the 6,584-page PDF, verified a native `FreeTextCallout`, and visually inspected the rendered affected page. Existing reviewer annotations were preserved; the new callout was readable in its external margin.
+- Full browser interaction was not executed: Playwright's browser executable is absent in this environment. JavaScript syntax and live HTTP behavior were checked; desktop/browser UI interaction remains a validation limitation.

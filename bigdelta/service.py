@@ -3,6 +3,7 @@ import base64
 import hashlib
 import io
 import json
+import os
 import sqlite3
 import uuid
 from contextlib import contextmanager
@@ -35,6 +36,7 @@ class Workspace:
         self.db = self.root / 'bigdelta.sqlite3'
         with self.connection() as conn:
             conn.execute('CREATE TABLE IF NOT EXISTS projects (id TEXT PRIMARY KEY, data TEXT NOT NULL)')
+            conn.execute('CREATE TABLE IF NOT EXISTS review_jobs (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, data TEXT NOT NULL)')
 
     @contextmanager
     def connection(self):
@@ -104,8 +106,8 @@ class Workspace:
             content = base64.b64decode(data.get('content', ''), validate=True)
         except Exception as exc:
             raise ValueError('Invalid upload encoding.') from exc
-        if not content or len(content) > 40 * 1024 * 1024:
-            raise ValueError('File must contain data and be smaller than 40 MB.')
+        if not content or len(content) > 120 * 1024 * 1024:
+            raise ValueError('File must contain data and be smaller than 120 MB.')
         is_pdf = filename.lower().endswith('.pdf')
         pages = 0
         if is_pdf:
@@ -238,3 +240,150 @@ class Workspace:
             raise ValueError('Choose two PDF revisions in this project.')
         return compare(self.file_path(left['file']), self.file_path(right['file']),
                        int(data.get('left_page', 1)), int(data.get('right_page', 1)))
+
+    def _review_job(self, pid, job_id):
+        self.project(pid)  # project ownership / existence check
+        with self.connection() as conn:
+            row = conn.execute('SELECT data FROM review_jobs WHERE id=? AND project_id=?', (job_id, pid)).fetchone()
+        if not row:
+            raise ValueError('Calculation review not found in this project.')
+        job = json.loads(row[0])
+        return self._check_review_owner(pid, job)
+
+    def _check_review_owner(self, pid, job):
+        if job['status'] in ('queued', 'running') and job.get('owner_pid'):
+            try:
+                os.kill(job['owner_pid'], 0)
+            except ProcessLookupError:
+                job.update(status='failed', message='Previous application session stopped. Start a new comparison.', error='Review interrupted by application shutdown.')
+                self._save_review_job(pid, job)
+            except PermissionError:
+                pass
+        return job
+
+    def _save_review_job(self, pid, job):
+        with self.connection() as conn:
+            conn.execute('INSERT OR REPLACE INTO review_jobs VALUES (?, ?, ?)', (job['id'], pid, json.dumps(job)))
+
+    def review_jobs(self, pid):
+        self.project(pid)
+        with self.connection() as conn:
+            rows = conn.execute('SELECT data FROM review_jobs WHERE project_id=?', (pid,)).fetchall()
+        jobs = [self._check_review_owner(pid, json.loads(row[0])) for row in rows]
+        return [{k: v for k, v in job.items() if k != 'result'} for job in sorted(jobs, key=lambda j: j['at'], reverse=True)]
+
+    def review_start(self, pid, data):
+        from concurrent.futures import ProcessPoolExecutor
+        from multiprocessing import get_context
+        p = self.project(pid)
+        revisions = {r['id']: r for d in p['documents'].values() for r in d['revisions']}
+        left, right = revisions.get(data.get('left')), revisions.get(data.get('right'))
+        if not left or not right or not left['is_pdf'] or not right['is_pdf'] or left['id'] == right['id']:
+            raise ValueError('Choose different earlier and newer PDF revisions in this project.')
+        if any(j['status'] in ('queued', 'running') for j in self.review_jobs(pid)):
+            raise ValueError('A calculation review is already running for this project.')
+        job = dict(id=uid(), at=now(), left=left['id'], right=right['id'], status='queued', progress=0,
+                   message='Waiting to compare PDFs', owner_pid=os.getpid(), earlier_name=left['filename'], newer_name=right['filename'])
+        self._save_review_job(pid, job)
+        # MuPDF is not thread-safe. Run comparison in a separate spawned process;
+        # the HTTP server remains responsive while large packages are analyzed.
+        if not hasattr(self, '_review_pool'):
+            self._review_pool = ProcessPoolExecutor(max_workers=1, mp_context=get_context('spawn'))
+        future = self._review_pool.submit(_execute_review, str(self.root), pid, job['id'])
+        def failed(f):
+            try:
+                exc = f.exception()
+            except Exception as error:
+                exc = error
+            if exc:
+                saved = self._review_job(pid, job['id'])
+                saved.update(status='failed', message='Review process stopped. Restart the review.', error=str(exc)[:1000])
+                self._save_review_job(pid, saved)
+        future.add_done_callback(failed)
+        return job
+
+    def review_update(self, pid, data):
+        from .revision_review import validate_findings
+        job = self._review_job(pid, required(data, 'job_id', 80))
+        if job['status'] != 'complete':
+            raise ValueError('Wait for the calculation comparison to finish.')
+        incoming = data.get('findings')
+        result = job['result']
+        validate_findings(incoming, result['newer_pages'])
+        original = {f['id']: f for f in result['findings']}
+        cleaned = []
+        p = self.project(pid)
+        newer = next(r for d in p['documents'].values() for r in d['revisions'] if r['id'] == job['right'])
+        for f in incoming:
+            if f['id'] in original:
+                saved = dict(original[f['id']])
+                # Evidence locations/direction cannot be forged by a UI edit.
+                for key in ('title', 'summary', 'category', 'priority', 'disposition'):
+                    saved[key] = f[key]
+            else:
+                if not f['id'].startswith('M'):
+                    raise ValueError('New manual findings must have IDs beginning with M.')
+                import pymupdf as fitz
+                with fitz.open(self.file_path(newer['file'])) as doc:
+                    page = doc[f['newer_page'] - 1]
+                    target = str(f.get('target_text', '')).strip()
+                    matches = page.search_for(target) if target else []
+                    if target and not matches:
+                        raise ValueError('Target text was not found on the selected newer PDF page.')
+                    rect = list(matches[0]) if matches else [40, 40, min(250, page.rect.width - 30), 70]
+                saved = {k: f.get(k) for k in ('id', 'title', 'summary', 'category', 'priority', 'disposition', 'newer_page')}
+                saved.update(rect=rect, earlier_page=None, confidence='manual', kind='manual', section='Manual finding')
+            cleaned.append(saved)
+        if not set(original).issubset({f['id'] for f in cleaned}):
+            raise ValueError('Keep existing findings and mark unwanted items Exclude.')
+        result['findings'] = sorted(cleaned, key=lambda f: (f['priority'], f['newer_page'], f['id']))
+        job['reviewed_at'] = now()
+        self._save_review_job(pid, job)
+        return job
+
+    def review_export(self, pid, data):
+        from .revision_review import export_callouts, file_sha256
+        job = self._review_job(pid, required(data, 'job_id', 80))
+        if job['status'] != 'complete':
+            raise ValueError('Wait for the calculation comparison to finish.')
+        p = self.project(pid)
+        newer = next(r for d in p['documents'].values() for r in d['revisions'] if r['id'] == job['right'])
+        if file_sha256(self.file_path(newer['file'])) != job['result']['newer_sha256']:
+            raise ValueError('The newer source PDF changed after comparison. Run a new review.')
+        export_id = uid()
+        relative = f'files/{export_id}.pdf'
+        output = self.file_path(relative)
+        try:
+            details = export_callouts(self.file_path(newer['file']), output, job['result']['findings'])
+        except Exception:
+            output.unlink(missing_ok=True)
+            raise
+        item = dict(id=export_id, file=relative, is_pdf=True, at=now(), job_id=job['id'],
+                    earlier_revision_id=job['left'], newer_revision_id=job['right'],
+                    source_sha256=job['result']['newer_sha256'], sha256=file_sha256(output), **details,
+                    findings=[f for f in job['result']['findings'] if f['disposition'] == 'include'])
+        # Reload after the long PDF write so simultaneous project changes survive.
+        p = self.project(pid)
+        p.setdefault('reviews', []).append(item)
+        self.save(p, f'Calculation review exported: {details["callout_count"]} individual callouts')
+        return item
+
+
+def _execute_review(root, pid, job_id):
+    """Spawn-safe worker; progress is stored separately from project mutations."""
+    from .revision_review import compare_calculations
+    ws = Workspace(root)
+    job = ws._review_job(pid, job_id)
+    def progress(percent, message):
+        job.update(status='running', progress=percent, message=message)
+        ws._save_review_job(pid, job)
+    try:
+        p = ws.project(pid)
+        revisions = {r['id']: r for d in p['documents'].values() for r in d['revisions']}
+        progress(0, 'Opening calculation packages')
+        result = compare_calculations(ws.file_path(revisions[job['left']]['file']),
+                                      ws.file_path(revisions[job['right']]['file']), progress)
+        job.update(status='complete', progress=100, message='Candidates ready for review', result=result)
+    except Exception as exc:
+        job.update(status='failed', message='Calculation review failed', error=str(exc)[:1500])
+    ws._save_review_job(pid, job)

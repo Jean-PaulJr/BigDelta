@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 from .service import Workspace
 
 STATIC = Path(__file__).parent / 'static'
-MAX_REQUEST = 57 * 1024 * 1024
+MAX_REQUEST = 165 * 1024 * 1024
 
 
 class LocalServer(HTTPServer):
@@ -55,11 +55,14 @@ def handler_for(workspace):
                 if path == '/api/state':
                     projects = workspace.projects()
                     return self.send(200, dict(projects=projects, checks={p['id']: workspace.check_project(p) for p in projects}, token=token))
+                parts = path.strip('/').split('/')
+                if len(parts) in (4, 5) and parts[:2] == ['api', 'projects'] and parts[3] == 'reviews':
+                    return self.send(200, workspace.review_jobs(parts[2]) if len(parts) == 4 else workspace._review_job(parts[2], parts[4]))
                 if path.startswith('/download/'):
                     # Only files referenced by a saved project can be downloaded.
                     file_id = path.removeprefix('/download/')
                     for p in workspace.projects():
-                        all_files = [r for d in p['documents'].values() for r in d['revisions']] + p['packages']
+                        all_files = [r for d in p['documents'].values() for r in d['revisions']] + p['packages'] + p.get('reviews', [])
                         match = next((r for r in all_files if r['id'] == file_id), None)
                         if match:
                             return self.send(200, workspace.file_path(match['file']).read_bytes(),
@@ -102,7 +105,9 @@ def handler_for(workspace):
                 actions = dict(update=workspace.update_project, template=workspace.template,
                                upload=workspace.upload, arrange=workspace.arrange, record=workspace.add_record,
                                change=workspace.add_change, resolve=workspace.resolve,
-                               compile=workspace.compile, compare=workspace.compare)
+                               compile=workspace.compile, compare=workspace.compare,
+                               review_start=workspace.review_start, review_update=workspace.review_update,
+                               review_export=workspace.review_export)
                 action = actions.get(parts[3])
                 if not action:
                     return self.send(404, {'error': 'Action not found.'})

@@ -12,7 +12,8 @@ from bigdelta.service import Workspace
 class HTTPTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.server = LocalServer(('127.0.0.1', 0), handler_for(Workspace(Path(self.temp.name))))
+        self.workspace = Workspace(Path(self.temp.name))
+        self.server = LocalServer(('127.0.0.1', 0), handler_for(self.workspace))
         self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
         self.thread.start()
         self.addCleanup(self.cleanup)
@@ -52,3 +53,14 @@ class HTTPTests(unittest.TestCase):
         self.assertEqual(self.request('GET','/../service.py')[0],404)
         self.assertEqual(self.request('GET','/download/unknown')[0],404)
         self.assertEqual(self.request('GET','/api/state',headers={'Host':'evil.example'})[0],403)
+
+    def test_calculation_review_routes_preserve_project_isolation_and_tokens(self):
+        p = self.workspace.create_project({'name': 'Calculation review'})
+        other = self.workspace.create_project({'name': 'Other project'})
+        self.workspace._save_review_job(p['id'], {'id': 'job1', 'at': '2026-01-01', 'status': 'complete', 'result': {'findings': []}})
+        status, body, _ = self.request('GET', f"/api/projects/{p['id']}/reviews/job1")
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)['id'], 'job1')
+        self.assertEqual(self.request('GET', f"/api/projects/{other['id']}/reviews/job1")[0], 404)
+        self.assertEqual(self.request('POST', f"/api/projects/{p['id']}/review_export", {'job_id': 'job1'})[0], 403)
+        self.assertEqual(self.request('GET', f"/api/projects/{p['id']}/reviews")[0], 200)

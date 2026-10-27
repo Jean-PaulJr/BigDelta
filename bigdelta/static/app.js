@@ -4,6 +4,9 @@ let currentId = localStorage.getItem('bigdelta-project');
 let tab = 'Package builder';
 let dialogAction = null;
 let comparison = null;
+let reviewSession = null;
+let reviewTimer = null;
+let reviewPage = 0;
 const $ = (id) => document.getElementById(id);
 const esc = (v) => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 const project = () => state.projects.find(p => p.id === currentId);
@@ -61,8 +64,8 @@ function render() {
     ['Coordination', checks.length, checks.length ? 'Items need review' : 'No tracked conflicts'],
     ['Report packages', p.packages.length, `${p.packages.filter(x=>x.issue).length} issued packages`]
   ].map(([title,value,caption])=>`<div class="stat"><div class="stat-title">${title}</div><b>${value}</b><small>${esc(caption)}</small>${title==='Project progress'?`<div class="progress"><div style="width:${p.progress}%"></div></div>`:''}</div>`).join('');
-  $('tabs').innerHTML = ['Package builder','Design changes','Drawing compare','Project journal','Overview'].map(t=>`<button data-action="tab" data-id="${t}" class="${tab===t?'active':''}">${t}</button>`).join('');
-  ({'Package builder':renderPackage,'Design changes':renderChanges,'Drawing compare':renderCompare,'Project journal':renderJournal,'Overview':renderOverview}[tab])();
+  $('tabs').innerHTML = ['Package builder','Design changes','Drawing compare','Calculation review','Project journal','Overview'].map(t=>`<button data-action="tab" data-id="${t}" class="${tab===t?'active':''}">${t}</button>`).join('');
+  ({'Package builder':renderPackage,'Design changes':renderChanges,'Drawing compare':renderCompare,'Calculation review':renderReview,'Project journal':renderJournal,'Overview':renderOverview}[tab])();
 }
 function renderPackage() {
   const p = project();
@@ -96,7 +99,7 @@ function uploadDialog(did) {
     (references.length ? `<label>References used by this revision</label><p class="help">Select the revision of each document this work relies on. A newer target revision will flag this document for coordination.</p><div class="check-list">${references.map(x=>`<label for="ref-${x.id}">${esc(x.title)}</label><select id="ref-${x.id}" name="reference"><option value="">Not referenced</option>${x.revisions.slice().reverse().map(r=>`<option value="${x.id}:${r.id}" ${selected.has(`${x.id}:${r.id}`)?'selected':''}>${esc(r.label)}${r.id===latest(x).id?' (latest)':''}</option>`).join('')}</select>`).join('')}</div>` : ''),
     async (data, form)=>{
       const files = [...form.elements.files.files].sort((a,b)=>a.name.localeCompare(b.name,undefined,{numeric:true}));
-      if (files.some(f=>f.size>40*1024*1024)) throw new Error('Each file must be smaller than 40 MB.');
+      if (files.some(f=>f.size>120*1024*1024)) throw new Error('Each file must be smaller than 120 MB.');
       const refs=[...form.querySelectorAll('[name=reference]')].filter(x=>x.value).map(x=>{const [document_id,revision_id]=x.value.split(':');return {document_id,revision_id};});
       localStorage.setItem('bigdelta-author',data.author);
       let done=0;
@@ -185,8 +188,8 @@ function exportJSON(name,data) {
 async function action(name,id,element) {
   const p=project();
   switch(name) {
-    case 'project':currentId=id;comparison=null;localStorage.setItem('bigdelta-project',id);render();break;
-    case 'tab':tab=id;render();break;
+    case 'project':currentId=id;comparison=null;reviewSession=null;clearTimeout(reviewTimer);localStorage.setItem('bigdelta-project',id);render();break;
+    case 'tab':clearTimeout(reviewTimer);tab=id;render();break;
     case 'upload':uploadDialog();break;
     case 'revision':uploadDialog(id);break;
     case 'template':templateDialog();break;
@@ -210,6 +213,13 @@ async function action(name,id,element) {
     case 'export-template':exportJSON('bigdelta-template.json',{name:p.name,sections:$('f-names').value.split('\n').map(s=>s.trim()).filter(Boolean)});break;
     case 'export-project':exportJSON('bigdelta-project-register.json',p);toast('Register exported. Copy the full data folder to back up files too.');break;
     case 'compare-mode':renderComparison(id);break;
+    case 'review-save':await saveReview();renderReviewResults();toast('Review decisions saved.');break;
+    case 'review-export':await exportReview(element);break;
+    case 'review-json':exportJSON('bigdelta-calculation-review.json',reviewSession.job);break;
+    case 'review-open':await openReview(id);break;
+    case 'review-manual':manualFinding();break;
+    case 'review-prev':reviewPage=Math.max(0,reviewPage-1);renderReviewResults();break;
+    case 'review-next':reviewPage++;renderReviewResults();break;
   }
 }
 document.addEventListener('click',e=>{const el=e.target.closest('[data-action]');if(el)action(el.dataset.action,el.dataset.id,el).catch(e=>toast(e.message));});
@@ -223,3 +233,102 @@ $('dialog-form').addEventListener('submit',async e=>{
   finally{btn.disabled=false;$('close-dialog').disabled=false;btn.textContent=label;}
 });
 refresh().catch(e=>toast(`Cannot load workspace: ${e.message}`));
+
+const reviewCategories = [
+  ['acceptance','1 · Acceptance changed'], ['assumption','2 · Fundamental assumption'],
+  ['loading','3 · Loading condition'], ['removed_check','4 · Check disappeared'],
+  ['propagation','5 · Input without downstream update'], ['geometry_material','6 · Geometry / material'],
+  ['conclusion','7 · Conflicting conclusion'], ['result','8 · Calculated result'], ['other','9 · Other change']
+];
+function renderReview() {
+  clearTimeout(reviewTimer);
+  const p=project(),pid=p.id;
+  const revisions=Object.values(p.documents).flatMap(d=>d.revisions.filter(r=>r.is_pdf).map(r=>[r.id,`${d.title} / ${r.label} (${r.pages} pages)`]));
+  $('content').innerHTML=`<div class="toolbar"><div><h2>Calculation revision review</h2><p>Find changes across a complete package, review the findings, then export individual callouts.</p></div>${button('upload','＋ Add PDFs')}</div>
+  <div class="notice"><b>Your review rules:</b> node loads are excluded. Acceptance transitions always remain visible. Numerical results are grouped only when corresponding applied loads change in the same calculation section. Each included finding becomes one editable PDF callout.</div>
+  <div class="card pad"><form id="review-form"><div class="compare-controls"><div>${select('Earlier PDF','left',revisions)}</div><div>${select('Newer PDF','right',revisions,revisions.at(-1)?.[0])}</div></div><p class="help">Choose the revision direction explicitly. Uploads may use separate document titles or unique revision labels. Processing stays on this computer.</p><button class="primary" ${revisions.length<2?'disabled':''}>Analyze calculation packages</button></form></div>
+  <div id="review-results"></div>
+  <div class="toolbar"><h3>Saved comparisons</h3></div><div id="review-jobs" class="card pad">Loading…</div>
+  <div class="toolbar"><h3>Exported callout copies</h3></div><div class="card pad">${(p.reviews||[]).length?p.reviews.slice().reverse().map(r=>`<p>${link(r.id,'Download reviewed PDF ↗')} · ${r.callout_count} callouts · ${date(r.at)}</p>`).join(''):'No review exports yet.'}</div>`;
+  $('review-form').addEventListener('submit',async e=>{
+    e.preventDefault();const b=e.target.querySelector('button');b.disabled=true;
+    try {
+      const job=await api(`/api/projects/${pid}/review_start`,Object.fromEntries(new FormData(e.target)));
+      if(currentId===pid&&tab==='Calculation review'){reviewSession={pid,job};reviewPage=0;renderReviewResults();pollReview(pid,job.id);}
+    } catch(err){toast(err.message);}finally{b.disabled=false;}
+  });
+  api(`/api/projects/${pid}/reviews`).then(jobs=>{
+    if(currentId!==pid||tab!=='Calculation review')return;
+    $('review-jobs').innerHTML=jobs.length?jobs.map(j=>`<div class="toolbar"><span>${esc(j.earlier_name)} → ${esc(j.newer_name)} · ${esc(j.status)} · ${date(j.at)}</span>${button('review-open','Open',j.id)}</div>`).join(''):'No comparisons yet.';
+  }).catch(e=>toast(e.message));
+  if(reviewSession?.pid===pid){renderReviewResults();if(['queued','running'].includes(reviewSession.job.status))pollReview(pid,reviewSession.job.id);}
+}
+async function openReview(id) {
+  const pid=currentId;
+  const job=await api(`/api/projects/${pid}/reviews/${id}`);
+  if(currentId!==pid||tab!=='Calculation review')return;
+  reviewSession={pid,job};reviewPage=0;renderReviewResults();
+  if(['queued','running'].includes(job.status))pollReview(pid,id);
+}
+function pollReview(pid,id) {
+  clearTimeout(reviewTimer);
+  reviewTimer=setTimeout(async()=>{
+    if(currentId!==pid||tab!=='Calculation review'||reviewSession?.job.id!==id)return;
+    try {
+      const job=await api(`/api/projects/${pid}/reviews/${id}`);
+      if(currentId!==pid||reviewSession?.job.id!==id)return;
+      reviewSession.job=job;renderReviewResults();
+      if(['queued','running'].includes(job.status))pollReview(pid,id);
+    }catch(e){toast(e.message);}
+  },1000);
+}
+function renderReviewResults() {
+  const root=$('review-results');if(!root||!reviewSession)return;
+  const j=reviewSession.job;
+  if(j.status==='failed'){root.innerHTML=`<div class="notice"><b>Review stopped.</b> ${esc(j.error||j.message)}</div>`;return;}
+  if(j.status!=='complete'){
+    root.innerHTML=`<div class="card pad" role="status"><h3>${esc(j.message)}</h3><p>${j.progress||0}%</p><progress max="100" value="${Number(j.progress)||0}"></progress><p class="help">You can switch tabs while comparison runs. Reopen it from Saved comparisons.</p></div>`;return;
+  }
+  const r=j.result,findings=r.findings, included=findings.filter(f=>f.disposition==='include').length;
+  const pageSize=30;reviewPage=Math.min(reviewPage,Math.max(0,Math.ceil(findings.length/pageSize)-1));
+  const shown=findings.slice(reviewPage*pageSize,(reviewPage+1)*pageSize);
+  root.innerHTML=`<div class="toolbar"><div><h3>${findings.length} candidates · ${included} included</h3><p>${r.unchanged_pages} pages matched unchanged; ${r.grouped_results.length} result changes grouped under revised loads.</p></div><div class="actions">${button('review-manual','＋ Add finding')}${button('review-save','Save decisions')}${button('review-json','Export review JSON')}${button('review-export','Export callout PDF')}</div></div>
+  <div class="notice"><b>Review each candidate.</b> Rule-based text matching does not verify engineering adequacy. Edit descriptions and categories, then choose Include or Exclude. Pending items are not exported. Unlabeled equations, numeric tables and graphics may need manual findings.</div>
+  <details class="card pad"><summary>Coverage and exclusions (${r.coverage_gaps.length} items)</summary><p>Node-load rows excluded: ${r.excluded_node_load_rows}. No node-load verification was performed.</p>${r.limitations.map(x=>`<p class="help">${esc(x)}</p>`).join('')}${r.coverage_gaps.slice(0,50).map(g=>`<p class="help">${esc(JSON.stringify(g))}</p>`).join('')}${r.coverage_gaps.length>50?'<p>Export review JSON for the full coverage list.</p>':''}</details>
+  <details class="card pad"><summary>Unclassified text / formula fragments (${(r.unclassified_changes||[]).length})</summary><p class="help">These fragments were not classified as engineering findings. Inspect the source and add manual findings when needed. Full details are in Export review JSON.</p>${(r.unclassified_changes||[]).slice(0,30).map(f=>`<div class="record"><b>Newer p${f.newer_page}</b><pre>${esc(f.summary)}</pre></div>`).join('')}</details>
+  <details class="card pad"><summary>Grouped numerical results (${r.grouped_results.length})</summary>${r.grouped_results.slice(0,50).map(f=>`<div class="record"><b>Newer p${f.newer_page}</b><pre>${esc(f.summary)}</pre></div>`).join('')}${r.grouped_results.length>50?'<p>Export review JSON for the full grouped list.</p>':''}</details>
+  <div class="toolbar"><span>Findings ${findings.length?reviewPage*pageSize+1:0}–${Math.min((reviewPage+1)*pageSize,findings.length)} of ${findings.length}</span><div class="actions">${button('review-prev','Previous','',''+(reviewPage===0?'disabled':''))}${button('review-next','Next','',''+((reviewPage+1)*pageSize>=findings.length?'disabled':''))}</div></div>
+  ${shown.map(f=>`<article class="card pad review-finding" data-finding="${esc(f.id)}"><div class="toolbar"><b>${esc(f.id)} · newer p${f.newer_page} · earlier p${f.earlier_page||'unmatched'}</b>${pill(f.confidence)}</div><p class="help">${esc(f.section||'')}</p><label>Title<input data-review-field="title" value="${esc(f.title)}" maxlength="240"></label><div class="compare-controls"><div><label>Priority / category<select data-review-field="category">${options(reviewCategories,f.category)}</select></label></div><div><label>Disposition<select data-review-field="disposition">${options([['pending','Pending review'],['include','Include in callout export'],['exclude','Exclude']],f.disposition)}</select></label></div></div><label>Change summary / description<textarea data-review-field="summary" maxlength="6000">${esc(f.summary)}</textarea></label></article>`).join('')||'<div class="card empty">No labeled-text candidates found. Inspect coverage gaps and add manual findings for engineering changes the rules could not interpret.</div>'}`;
+  root.addEventListener('input',updateReviewField);
+  root.addEventListener('change',updateReviewField);
+}
+function updateReviewField(e) {
+  const el=e.target.closest('[data-review-field]'),card=el?.closest('[data-finding]');
+  if(!card||!reviewSession)return;
+  const f=reviewSession.job.result.findings.find(x=>x.id===card.dataset.finding);
+  f[el.dataset.reviewField]=el.value;
+}
+async function saveReview() {
+  if(reviewSession?.job.status!=='complete')throw new Error('Open a completed comparison first.');
+  const pid=reviewSession.pid, id=reviewSession.job.id;
+  const job=await api(`/api/projects/${pid}/review_update`,{job_id:id,findings:reviewSession.job.result.findings});
+  if(reviewSession?.job.id===id)reviewSession.job=job;
+}
+async function exportReview(el) {
+  el.disabled=true;el.textContent='Writing callouts…';
+  try {
+    await saveReview();
+    await api(`/api/projects/${reviewSession.pid}/review_export`,{job_id:reviewSession.job.id});
+    await refresh();toast('Callout copy saved. Download it under Exported callout copies.');
+  }finally{el.disabled=false;el.textContent='Export callout PDF';}
+}
+function manualFinding() {
+  if(reviewSession?.job.status!=='complete')return toast('Open a completed comparison first.');
+  modal('Add an individual discrepancy',field('Newer PDF page','newer_page',1,'number',`min="1" max="${reviewSession.job.result.newer_pages}" required`)+
+    field('Text to point to (optional; exact source text)','target_text')+
+    select('Priority / category','category',reviewCategories)+field('Title','title','','text','required maxlength="240"')+
+    textarea('Change summary / description','summary','','required maxlength="6000"'),async data=>{
+      reviewSession.job.result.findings.push({...data,id:'M'+Date.now(),newer_page:Number(data.newer_page),earlier_page:null,disposition:'include',confidence:'manual',section:'Manual finding'});
+      try{await saveReview();renderReviewResults();}catch(e){reviewSession.job.result.findings.pop();throw e;}
+    },'Add callout finding');
+}
